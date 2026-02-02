@@ -1,0 +1,126 @@
+{
+	"name": "remote-chat-control",
+	"displayName": "Remote Chat Control",
+	"description": "Control VS Code AI Chat remotely via mobile-friendly browser interface with WebSocket support",
+	"version": "0.1.0",
+	"engines": {
+		"vscode": "^1.93.0"
+	},
+	"categories": [
+		"Chat",
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"chatParticipants": [
+			{
+				"id": "remote-control.remote",
+				"fullName": "Remote Control",
+				"name": "remote",
+				"description": "Chat participant that syncs with browser remote control",
+				"isSticky": true,
+				"commands": [
+					{
+						"name": "files",
+						"description": "List files in workspace"
+					},
+					{
+						"name": "search",
+						"description": "Search for text in workspace"
+					},
+					{
+						"name": "run",
+						"description": "Run a terminal command"
+					}
+				]
+			}
+		],
+		"commands": [
+			{
+				"command": "remoteChatControl.startServer",
+				"title": "Remote Chat: Start Server",
+				"icon": "$(broadcast)"
+			},
+			{
+				"command": "remoteChatControl.stopServer",
+				"title": "Remote Chat: Stop Server",
+				"icon": "$(circle-slash)"
+			},
+			{
+				"command": "remoteChatControl.toggleServer",
+				"title": "Remote Chat: Toggle Server"
+			},
+			{
+				"command": "remoteChatControl.showPanel",
+				"title": "Remote Chat: Open in Browser",
+				"icon": "$(globe)"
+			},
+			{
+				"command": "remoteChatControl.sendMessage",
+				"title": "Remote Chat: Send Message"
+			},
+			{
+				"command": "remoteChatControl.clearHistory",
+				"title": "Remote Chat: Clear History"
+			},
+			{
+				"command": "remoteChatControl.connectRemote",
+				"title": "Remote Chat: Connect to Server",
+				"icon": "$(cloud-upload)"
+			},
+			{
+				"command": "remoteChatControl.disconnectRemote",
+				"title": "Remote Chat: Disconnect from Server",
+				"icon": "$(cloud-download)"
+			}
+		],
+		"configuration": {
+			"title": "Remote Chat Control",
+			"properties": {
+				"remoteChatControl.httpPort": {
+					"type": "number",
+					"default": 3847,
+					"description": "HTTP server port"
+				},
+				"remoteChatControl.wsPort": {
+					"type": "number",
+					"default": 3848,
+					"description": "WebSocket server port"
+				},
+				"remoteChatControl.autoStart": {
+					"type": "boolean",
+					"default": true,
+					"description": "Auto-start server on extension activation"
+				},
+				"remoteChatControl.remoteServerUrl": {
+					"type": "string",
+					"default": "",
+					"description": "Remote PHP server URL for controlling VS Code from anywhere"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"lint": "eslint src --ext ts"
+	},
+	"dependencies": {
+		"ws": "^8.19.0"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.93.0",
+		"@types/ws": "^8.18.1",
+		"typescript": "^5.3.0"
+	},
+	"__metadata": {
+		"installedTimestamp": 1769983891427,
+		"targetPlatform": "undefined",
+		"size": 918171
+	}
+}

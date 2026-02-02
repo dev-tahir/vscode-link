@@ -1,0 +1,22 @@
+# VS Code Remote Chat Control - Apache Configuration
+
+# Enable URL rewriting if needed
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+</IfModule>
+
+# Allow CORS
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, POST, OPTIONS"
+    Header set Access-Control-Allow-Headers "Content-Type, X-Instance-Key"
+</IfModule>
+
+# Protect data directory
+<Files "data/*">
+    Order Deny,Allow
+    Deny from all
+</Files>
+
+# Set default index
+DirectoryIndex index.php
