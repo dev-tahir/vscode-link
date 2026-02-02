@@ -1634,16 +1634,18 @@ export function getWebViewHTML(): string {
             
             let sessionMode = 'current';
             let sessionId = null;
-            
-            if (sessionSelect === 'new') {
+
+            // First priority: If viewing a session, use that session
+            if (isInMessagesView && selectedSessionIndex >= 0 && currentInbox?.sessions?.[selectedSessionIndex]?.sessionId) {
+                sessionMode = 'session';
+                sessionId = currentInbox.sessions[selectedSessionIndex].sessionId;
+            } else if (sessionSelect === 'new') {
                 sessionMode = 'new';
             } else if (sessionSelect.startsWith('session-')) {
                 sessionMode = 'session';
                 const idx = parseInt(sessionSelect.replace('session-', ''));
                 sessionId = currentInbox?.sessions?.[idx]?.sessionId;
             }
-            
-            const sendBtn = document.getElementById('sendBtn');
             sendBtn.disabled = true;
             sendBtn.textContent = '...';
             

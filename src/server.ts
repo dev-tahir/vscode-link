@@ -548,20 +548,36 @@ export async function sendToChat(message: string, model?: string, sessionMode?: 
                 await vscode.commands.executeCommand('type', { text: '\n' });
             }
         } else {
-            await vscode.commands.executeCommand('workbench.action.chat.open', {
-                query: message,
-                isPartialQuery: false
-            });
+            // Use PowerShell to type into existing chat (same approach as approve/skip)
+            const { exec } = require('child_process');
             
-            setTimeout(async () => {
-                try {
-                    await vscode.commands.executeCommand('workbench.action.chat.submit');
-                } catch (e) {
-                    log(`Submit command failed: ${e}`);
-                }
-            }, 500);
+            // Escape message for PowerShell
+            const escapedMessage = message.replace(/'/g, "''").replace(/`/g, "``").replace(/\$/g, "`$");
+            
+            const activateScript = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::AppActivate('Visual Studio Code'); Start-Sleep -Milliseconds 500`;
+            
+            await new Promise<void>((resolve) => {
+                exec(`powershell -Command "${activateScript}"`, async () => {
+                    // Focus chat input
+                    try {
+                        await vscode.commands.executeCommand('workbench.action.chat.focusInput');
+                    } catch {
+                        await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
+                    }
+                    await new Promise(r => setTimeout(r, 500));
+                    
+                    // Type message using SendKeys
+                    const typeScript = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escapedMessage.replace(/[+^%~(){}[\]]/g, '{$&}')}')`;
+                    exec(`powershell -Command "${typeScript}"`, () => {
+                        // Submit with Enter after typing
+                        setTimeout(() => {
+                            const submitScript = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')`;
+                            exec(`powershell -Command "${submitScript}"`, () => resolve());
+                        }, 500);
+                    });
+                });
+            });
         }
-        
         // Notify clients
         broadcastToClients({
             type: 'message_update',
