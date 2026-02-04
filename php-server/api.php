@@ -12,6 +12,12 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, X-Instance-Key');
 
+// Prevent caching
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Cache-Control: post-check=0, pre-check=0', false);
+header('Pragma: no-cache');
+header('Expires: 0');
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit;
@@ -155,7 +161,12 @@ switch ($action) {
         $instance['lastSeen'] = time();
         saveJson($instanceFile, $instance);
         
-        response(['success' => true]);
+        // Log inbox update for debugging
+        $sessionCount = is_array($instance['inbox']) && isset($instance['inbox']['sessions']) 
+            ? count($instance['inbox']['sessions']) 
+            : 0;
+        
+        response(['success' => true, 'sessionCount' => $sessionCount]);
         break;
         
     case 'message-processed':
@@ -212,7 +223,21 @@ switch ($action) {
     case 'instances':
         // Browser gets list of online VS Code instances
         $instances = [];
-        $files = glob(DATA_DIR . '/instance_*.json');
+        
+        // Try glob first, then fallback to scandir
+        $pattern = DATA_DIR . '/instance_*.json';
+        $files = glob($pattern);
+        
+        // Fallback: if glob returns empty, try scandir
+        if (empty($files) && is_dir(DATA_DIR)) {
+            $allFiles = scandir(DATA_DIR);
+            $files = [];
+            foreach ($allFiles as $f) {
+                if (strpos($f, 'instance_') === 0 && substr($f, -5) === '.json') {
+                    $files[] = DATA_DIR . '/' . $f;
+                }
+            }
+        }
         
         foreach ($files as $file) {
             $inst = loadJson($file);
@@ -364,6 +389,55 @@ switch ($action) {
     case 'status':
         // Health check
         response(['status' => 'ok', 'time' => time()]);
+        break;
+        
+    case 'debug':
+        // Debug endpoint to see what's stored
+        $key = $_GET['key'] ?? '';
+        if (!$key) {
+            // List all data files using scandir (more reliable than glob)
+            $info = [];
+            if (is_dir(DATA_DIR)) {
+                $allFiles = scandir(DATA_DIR);
+                foreach ($allFiles as $f) {
+                    if ($f === '.' || $f === '..') continue;
+                    $filePath = DATA_DIR . '/' . $f;
+                    if (is_file($filePath)) {
+                        $info[] = [
+                            'file' => $f,
+                            'size' => filesize($filePath),
+                            'modified' => date('Y-m-d H:i:s', filemtime($filePath))
+                        ];
+                    }
+                }
+            }
+            response([
+                'success' => true, 
+                'files' => $info, 
+                'dataDir' => DATA_DIR,
+                'dataDirExists' => is_dir(DATA_DIR),
+                'dataDirWritable' => is_writable(DATA_DIR)
+            ]);
+        } else {
+            // Show specific instance data
+            $instanceFile = getInstanceFile($key);
+            $instance = loadJson($instanceFile);
+            $inboxSessions = isset($instance['inbox']['sessions']) ? count($instance['inbox']['sessions']) : 0;
+            response([
+                'success' => true,
+                'instanceFile' => basename($instanceFile),
+                'exists' => file_exists($instanceFile),
+                'instance' => [
+                    'key' => $instance['key'] ?? null,
+                    'workspaceName' => $instance['workspaceName'] ?? null,
+                    'lastSeen' => $instance['lastSeen'] ?? null,
+                    'lastSeenAgo' => isset($instance['lastSeen']) ? (time() - $instance['lastSeen']) . 's ago' : null,
+                    'hasInbox' => isset($instance['inbox']),
+                    'inboxSessions' => $inboxSessions,
+                    'inboxTotalMessages' => $instance['inbox']['totalMessages'] ?? 0
+                ]
+            ]);
+        }
         break;
         
     default:

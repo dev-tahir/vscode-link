@@ -795,19 +795,29 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
                 const r = await fetch(API + '?action=inbox&key=' + selectedInstance);
                 const d = await r.json();
                 
-                if (d.success && d.inbox) {
-                    currentInbox = d.inbox;
-                    updateInboxStatus('online', d.status + ' • ' + (currentInbox.sessions?.length || 0) + ' sessions');
-                    renderSessions();
-                    
-                    if (isInMessagesView && selectedSessionIndex >= 0) {
-                        const session = currentInbox.sessions?.[selectedSessionIndex];
-                        if (session) renderMessages(session);
+                console.log('Inbox response:', d);
+                
+                if (d.success) {
+                    if (d.inbox && d.inbox.sessions) {
+                        currentInbox = d.inbox;
+                        updateInboxStatus('online', d.status + ' • ' + (currentInbox.sessions?.length || 0) + ' sessions');
+                        renderSessions();
+                        
+                        if (isInMessagesView && selectedSessionIndex >= 0) {
+                            const session = currentInbox.sessions?.[selectedSessionIndex];
+                            if (session) renderMessages(session);
+                        }
+                    } else {
+                        currentInbox = null;
+                        updateInboxStatus(d.status === 'online' ? 'online' : 'offline', 
+                            d.status === 'online' ? 'VS Code online - No sessions yet' : 'VS Code offline');
+                        renderSessions();
                     }
                 } else {
-                    updateInboxStatus('offline', d.status === 'offline' ? 'VS Code offline' : 'No data');
+                    updateInboxStatus('offline', d.error || 'Error loading');
                 }
             } catch (e) {
+                console.error('Inbox error:', e);
                 updateInboxStatus('offline', 'Error loading inbox');
             }
         }

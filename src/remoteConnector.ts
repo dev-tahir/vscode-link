@@ -23,6 +23,7 @@ export class RemoteConnector {
     private isRunning: boolean = false;
     private outputChannel: vscode.OutputChannel;
     private onMessageCallback: ((message: any) => Promise<void>) | null = null;
+    private processedMessageIds: Set<string> = new Set();
     private onCommandActionCallback: ((action: string) => Promise<void>) | null = null;
     private getInboxCallback: (() => any) | null = null;
 
@@ -79,14 +80,36 @@ export class RemoteConnector {
             // Start heartbeat
             this.startHeartbeat();
 
-            // Send initial inbox state
-            await this.updateInbox();
+            // Send initial inbox state with retry
+            await this.updateInboxWithRetry();
 
             return true;
         } catch (error: any) {
             this.log(`Connection error: ${error.message}`);
             return false;
         }
+    }
+    
+    /**
+     * Update inbox with retry if initially null
+     */
+    private async updateInboxWithRetry(maxRetries: number = 3) {
+        for (let i = 0; i < maxRetries; i++) {
+            if (!this.isRunning || !this.getInboxCallback) return;
+            
+            const inbox = this.getInboxCallback();
+            if (inbox && inbox.sessions) {
+                this.log(`Initial inbox sync: Found ${inbox.sessions.length} sessions`);
+                await this.apiCall('update-inbox', 'POST', { inbox });
+                return;
+            }
+            
+            this.log(`Inbox not ready, retrying in 2 seconds... (${i + 1}/${maxRetries})`);
+            await new Promise(r => setTimeout(r, 2000));
+        }
+        
+        // Final attempt - send whatever we have
+        await this.updateInbox();
     }
 
     /**
@@ -104,6 +127,9 @@ export class RemoteConnector {
             clearInterval(this.heartbeatTimer);
             this.heartbeatTimer = null;
         }
+        
+        // Clear processed messages tracking
+        this.processedMessageIds.clear();
 
         this.log('Disconnected from remote server');
     }
@@ -163,26 +189,38 @@ export class RemoteConnector {
             } catch (error: any) {
                 this.log(`Heartbeat error: ${error.message}`);
             }
-        }, 30000); // Every 30 seconds
+        }, 10000); // Every 10 seconds for faster inbox sync
     }
 
     /**
      * Process incoming message from browser
      */
     private async processMessage(msg: any) {
-        this.log(`Processing message: ${msg.id}`);
+        const messageId = msg.id;
+        
+        // Check if already processed
+        if (this.processedMessageIds.has(messageId)) {
+            return;
+        }
+        
+        // Mark as being processed immediately
+        this.processedMessageIds.add(messageId);
+        this.log(`Processing message: ${messageId}`);
 
         if (this.onMessageCallback) {
             try {
+                // Mark as processed on server BEFORE calling callback to prevent duplicate polling
+                await this.apiCall('message-processed', 'POST', { messageId });
+                
+                // Now process the message
                 await this.onMessageCallback(msg);
-
-                // Mark as processed
-                await this.apiCall('message-processed', 'POST', { messageId: msg.id });
 
                 // Update inbox after processing
                 setTimeout(() => this.updateInbox(), 1000);
             } catch (error: any) {
                 this.log(`Error processing message: ${error.message}`);
+                // Remove from processed set on error so it can be retried
+                this.processedMessageIds.delete(messageId);
             }
         }
     }
@@ -210,7 +248,21 @@ export class RemoteConnector {
 
         try {
             const inbox = this.getInboxCallback();
-            await this.apiCall('update-inbox', 'POST', { inbox });
+            
+            if (!inbox) {
+                this.log('updateInbox: Inbox is null, skipping update');
+                return;
+            }
+            
+            this.log(`updateInbox: Sending ${inbox.sessions?.length || 0} sessions to server`);
+            
+            const result = await this.apiCall('update-inbox', 'POST', { inbox });
+            
+            if (result.success) {
+                this.log('updateInbox: Successfully updated inbox on server');
+            } else {
+                this.log(`updateInbox: Server error - ${result.error || 'unknown'}`);
+            }
         } catch (error: any) {
             this.log(`Error updating inbox: ${error.message}`);
         }

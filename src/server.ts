@@ -697,8 +697,24 @@ export function getChatHistory() {
 }
 
 export function getCurrentInbox() {
-    if (!currentWorkspaceHash) return null;
-    return inbox.getInboxForWorkspace(currentWorkspaceHash);
+    // Try to get workspaceHash if not already set
+    let hash = currentWorkspaceHash;
+    if (!hash) {
+        hash = inbox.getCurrentWorkspaceHash();
+        if (hash) {
+            currentWorkspaceHash = hash;
+            log(`Late-detected workspace hash: ${hash}`);
+        }
+    }
+    
+    if (!hash) {
+        log('getCurrentInbox: No workspace hash available');
+        return null;
+    }
+    
+    const inboxData = inbox.getInboxForWorkspace(hash);
+    log(`getCurrentInbox: Found ${inboxData?.sessions?.length || 0} sessions`);
+    return inboxData;
 }
 
 export async function handleCommandAction(action: string): Promise<void> {
