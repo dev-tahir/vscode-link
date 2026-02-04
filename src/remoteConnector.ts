@@ -149,8 +149,16 @@ export class RemoteConnector {
                 const result = await this.apiCall('poll', 'GET');
 
                 if (result.success) {
+                    const msgCount = (result.messages || []).length;
+                    const cmdCount = (result.pendingCommands || []).length;
+                    
+                    if (msgCount > 0 || cmdCount > 0) {
+                        this.log(`Poll: ${msgCount} messages, ${cmdCount} commands`);
+                    }
+                    
                     // Process pending messages
                     for (const msg of result.messages || []) {
+                        this.log(`Poll found message: ${msg.id} - "${msg.message?.substring(0, 50)}..."`);
                         await this.processMessage(msg);
                     }
 
@@ -163,6 +171,8 @@ export class RemoteConnector {
                     if ((result.pendingCommands || []).length > 0) {
                         await this.apiCall('clear-commands', 'POST');
                     }
+                } else {
+                    this.log(`Poll failed: ${result.error || 'unknown error'}`);
                 }
             } catch (error: any) {
                 this.log(`Poll error: ${error.message}`);
@@ -200,20 +210,24 @@ export class RemoteConnector {
         
         // Check if already processed
         if (this.processedMessageIds.has(messageId)) {
+            this.log(`Message ${messageId} already processed, skipping`);
             return;
         }
         
         // Mark as being processed immediately
         this.processedMessageIds.add(messageId);
-        this.log(`Processing message: ${messageId}`);
+        this.log(`Processing message: ${messageId} - "${msg.message}"`);
 
         if (this.onMessageCallback) {
             try {
                 // Mark as processed on server BEFORE calling callback to prevent duplicate polling
+                this.log(`Marking message ${messageId} as processed on server...`);
                 await this.apiCall('message-processed', 'POST', { messageId });
                 
                 // Now process the message
+                this.log(`Calling message callback for: "${msg.message}"`);
                 await this.onMessageCallback(msg);
+                this.log(`Message callback completed for: ${messageId}`);
 
                 // Update inbox after processing
                 setTimeout(() => this.updateInbox(), 1000);
@@ -222,6 +236,8 @@ export class RemoteConnector {
                 // Remove from processed set on error so it can be retried
                 this.processedMessageIds.delete(messageId);
             }
+        } else {
+            this.log(`No message callback set!`);
         }
     }
 

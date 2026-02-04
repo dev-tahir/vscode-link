@@ -509,75 +509,47 @@ export async function sendToChat(message: string, model?: string, sessionMode?: 
 
     try {
         let note: string | undefined;
-        let sessionOpened = false;
         
         if (sessionMode === 'new') {
             await vscode.commands.executeCommand('workbench.action.chat.newChat');
             await new Promise(r => setTimeout(r, 300));
             note = 'Created new chat';
-        } else if (sessionMode === 'session' && sessionId) {
+        }
+        
+        // Use the VS Code Chat API to send message directly
+        // This opens the chat panel with the message and auto-submits
+        try {
+            // Method 1: Use workbench.action.chat.open with query (newer API)
+            await vscode.commands.executeCommand('workbench.action.chat.open', {
+                query: message,
+                isPartialQuery: false  // false = auto-submit the message
+            });
+            log('Message sent via chat.open API');
+        } catch (e1) {
+            log(`chat.open failed: ${e1}, trying alternative...`);
+            
             try {
-                const encodedSessionId = Buffer.from(sessionId).toString('base64');
-                const sessionUri = vscode.Uri.parse(`vscode-chat-session://local/${encodedSessionId}`);
-                await vscode.commands.executeCommand('vscode.open', sessionUri);
-                note = 'Opened session';
-                sessionOpened = true;
-                await new Promise(r => setTimeout(r, 800));
-            } catch (e) {
-                log(`Session open error: ${e}`);
-                note = 'Session open failed, sending to current';
+                // Method 2: Focus chat and use type + submit commands
+                await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
+                await new Promise(r => setTimeout(r, 300));
+                
+                // Clear any existing input first
+                await vscode.commands.executeCommand('editor.action.selectAll');
+                await new Promise(r => setTimeout(r, 100));
+                
+                // Type the message
+                await vscode.commands.executeCommand('type', { text: message });
+                await new Promise(r => setTimeout(r, 200));
+                
+                // Submit
+                await vscode.commands.executeCommand('workbench.action.chat.submit');
+                log('Message sent via type + submit');
+            } catch (e2) {
+                log(`Alternative also failed: ${e2}`);
+                throw e2;
             }
         }
         
-        if (sessionOpened) {
-            await new Promise(r => setTimeout(r, 500));
-            
-            try {
-                await vscode.commands.executeCommand('workbench.action.chat.focusInput');
-            } catch {
-                await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
-            }
-            await new Promise(r => setTimeout(r, 300));
-            
-            await vscode.commands.executeCommand('type', { text: message });
-            await new Promise(r => setTimeout(r, 300));
-            
-            try {
-                await vscode.commands.executeCommand('workbench.action.chat.submit');
-            } catch {
-                await vscode.commands.executeCommand('type', { text: '\n' });
-            }
-        } else {
-            // Use PowerShell to type into existing chat (same approach as approve/skip)
-            const { exec } = require('child_process');
-            
-            // Escape message for PowerShell
-            const escapedMessage = message.replace(/'/g, "''").replace(/`/g, "``").replace(/\$/g, "`$");
-            
-            const activateScript = `Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::AppActivate('Visual Studio Code'); Start-Sleep -Milliseconds 500`;
-            
-            await new Promise<void>((resolve) => {
-                exec(`powershell -Command "${activateScript}"`, async () => {
-                    // Focus chat input
-                    try {
-                        await vscode.commands.executeCommand('workbench.action.chat.focusInput');
-                    } catch {
-                        await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
-                    }
-                    await new Promise(r => setTimeout(r, 500));
-                    
-                    // Type message using SendKeys
-                    const typeScript = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escapedMessage.replace(/[+^%~(){}[\]]/g, '{$&}')}')`;
-                    exec(`powershell -Command "${typeScript}"`, () => {
-                        // Submit with Enter after typing
-                        setTimeout(() => {
-                            const submitScript = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')`;
-                            exec(`powershell -Command "${submitScript}"`, () => resolve());
-                        }, 500);
-                    });
-                });
-            });
-        }
         // Notify clients
         broadcastToClients({
             type: 'message_update',
