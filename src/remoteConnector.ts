@@ -24,6 +24,7 @@ export class RemoteConnector {
     private outputChannel: vscode.OutputChannel;
     private onMessageCallback: ((message: any) => Promise<void>) | null = null;
     private processedMessageIds: Set<string> = new Set();
+    private processedFileRequestIds: Set<string> = new Set();
     private onCommandActionCallback: ((action: string) => Promise<void>) | null = null;
     private getInboxCallback: (() => any) | null = null;
 
@@ -128,8 +129,9 @@ export class RemoteConnector {
             this.heartbeatTimer = null;
         }
         
-        // Clear processed messages tracking
+        // Clear processed tracking
         this.processedMessageIds.clear();
+        this.processedFileRequestIds.clear();
 
         this.log('Disconnected from remote server');
     }
@@ -151,9 +153,10 @@ export class RemoteConnector {
                 if (result.success) {
                     const msgCount = (result.messages || []).length;
                     const cmdCount = (result.pendingCommands || []).length;
+                    const fileCount = (result.fileRequests || []).length;
                     
-                    if (msgCount > 0 || cmdCount > 0) {
-                        this.log(`Poll: ${msgCount} messages, ${cmdCount} commands`);
+                    if (msgCount > 0 || cmdCount > 0 || fileCount > 0) {
+                        this.log(`Poll: ${msgCount} messages, ${cmdCount} commands, ${fileCount} file requests`);
                     }
                     
                     // Process pending messages
@@ -165,6 +168,11 @@ export class RemoteConnector {
                     // Process pending command actions
                     for (const cmd of result.pendingCommands || []) {
                         await this.processCommandAction(cmd);
+                    }
+
+                    // Process pending file read requests
+                    for (const fileReq of result.fileRequests || []) {
+                        await this.processFileRequest(fileReq);
                     }
 
                     // Clear processed commands
@@ -253,6 +261,53 @@ export class RemoteConnector {
             } catch (error: any) {
                 this.log(`Error processing command action: ${error.message}`);
             }
+        }
+    }
+
+    /**
+     * Process file read request from browser
+     */
+    private async processFileRequest(fileReq: any) {
+        const requestId = fileReq.id;
+        
+        // Check if already processed
+        if (this.processedFileRequestIds.has(requestId)) {
+            return;
+        }
+        
+        this.processedFileRequestIds.add(requestId);
+        this.log(`Processing file request: ${requestId} - ${fileReq.filepath}`);
+        
+        try {
+            const filepath = fileReq.filepath;
+            let content: string | null = null;
+            let error: string | null = null;
+            
+            try {
+                // Try to read the file
+                const fs = require('fs');
+                if (fs.existsSync(filepath)) {
+                    content = fs.readFileSync(filepath, 'utf-8');
+                    this.log(`File read successfully: ${filepath} (${content?.length || 0} bytes)`);
+                } else {
+                    error = 'File not found';
+                    this.log(`File not found: ${filepath}`);
+                }
+            } catch (e: any) {
+                error = e.message || 'Failed to read file';
+                this.log(`Error reading file: ${e.message}`);
+            }
+            
+            // Send content back to server
+            await this.apiCall('file-content', 'POST', {
+                requestId,
+                content,
+                error
+            });
+            
+        } catch (error: any) {
+            this.log(`Error processing file request: ${error.message}`);
+            this.processedFileRequestIds.delete(requestId);
         }
     }
 

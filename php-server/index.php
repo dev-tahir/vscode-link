@@ -6,6 +6,12 @@
  * Upload this along with api.php to your PHP server.
  */
 
+// Prevent caching
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Cache-Control: post-check=0, pre-check=0', false);
+header('Pragma: no-cache');
+header('Expires: 0');
+
 // Get the API URL (same directory)
 $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . 
           '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['REQUEST_URI']) . '/api.php';
@@ -587,6 +593,75 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
             padding: 2px 6px;
             font-size: 12px;
         }
+
+        /* File Modal */
+        .file-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 300;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .file-modal.open {
+            display: flex;
+        }
+
+        .file-modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            width: 100%;
+            max-width: 600px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .file-modal-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .file-modal-title {
+            font-weight: 500;
+            font-size: 13px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-modal-body {
+            flex: 1;
+            overflow: auto;
+            padding: 16px;
+        }
+
+        .file-content {
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 0;
+        }
+
+        .file-link {
+            color: var(--accent);
+            text-decoration: underline;
+            cursor: pointer;
+        }
+
+        .file-link:hover {
+            opacity: 0.8;
+        }
     </style>
 </head>
 <body>
@@ -686,6 +761,19 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
             </div>
         </div>
     </main>
+
+    <!-- File Modal -->
+    <div class="file-modal" id="fileModal" onclick="if(event.target.id==='fileModal') closeFileModal()">
+        <div class="file-modal-content">
+            <div class="file-modal-header">
+                <span class="file-modal-title" id="fileModalTitle">File</span>
+                <button class="icon-btn" onclick="closeFileModal()">✕</button>
+            </div>
+            <div class="file-modal-body">
+                <pre class="file-content" id="fileModalContent">Loading...</pre>
+            </div>
+        </div>
+    </div>
 
     <div class="toast" id="toast"></div>
 
@@ -798,7 +886,12 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
                 console.log('Inbox response:', d);
                 
                 if (d.success) {
-                    if (d.inbox && d.inbox.sessions) {
+                    // Show debug info
+                    if (d.debug) {
+                        console.log('Inbox debug:', d.debug);
+                    }
+                    
+                    if (d.inbox && d.inbox.sessions && d.inbox.sessions.length > 0) {
                         currentInbox = d.inbox;
                         updateInboxStatus('online', d.status + ' • ' + (currentInbox.sessions?.length || 0) + ' sessions');
                         renderSessions();
@@ -809,8 +902,10 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
                         }
                     } else {
                         currentInbox = null;
-                        updateInboxStatus(d.status === 'online' ? 'online' : 'offline', 
-                            d.status === 'online' ? 'VS Code online - No sessions yet' : 'VS Code offline');
+                        const statusText = d.status === 'online' 
+                            ? 'VS Code online - No chat sessions found' 
+                            : 'VS Code offline';
+                        updateInboxStatus(d.status === 'online' ? 'online' : 'offline', statusText);
                         renderSessions();
                     }
                 } else {
@@ -911,7 +1006,7 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
                     </div>`;
                 }
                 
-                html += `<div class="message-content">${escapeHtml(m.text)}</div>`;
+                html += `<div class="message-content">${linkifyFiles(m.text)}</div>`;
                 
                 if (m.pendingCommand?.command) {
                     html += `<div class="pending-command">
@@ -1016,6 +1111,66 @@ $apiUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'h
         function escapeHtml(text) {
             if (!text) return '';
             return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // File handling - convert [[FILE|path|name]] to clickable links
+        function linkifyFiles(text) {
+            if (!text) return '';
+            // First escape HTML, then convert file markers to links
+            let escaped = escapeHtml(text);
+            // Match [[FILE|path|name]] pattern
+            return escaped.replace(/\[\[FILE\|([^|]+)\|([^\]]+)\]\]/g, (match, filepath, filename) => {
+                const encoded = btoa(filepath);
+                return `<span class="file-link" onclick="openFile('${encoded}')">${filename}</span>`;
+            });
+        }
+
+        async function openFile(encodedPath) {
+            if (!selectedInstance) {
+                showToast('No VS Code instance selected');
+                return;
+            }
+            
+            const filepath = atob(encodedPath);
+            const filename = filepath.split(/[/\\]/).pop() || filepath;
+            document.getElementById('fileModalTitle').textContent = filename;
+            document.getElementById('fileModalContent').textContent = 'Loading file from VS Code...';
+            document.getElementById('fileModal').classList.add('open');
+            
+            try {
+                // Request file from VS Code via PHP server
+                const reqRes = await fetch(API + '?action=request-file&key=' + selectedInstance, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filepath })
+                });
+                const reqData = await reqRes.json();
+                
+                if (!reqData.success) {
+                    document.getElementById('fileModalContent').textContent = 'Error: ' + (reqData.error || 'Failed to request file');
+                    return;
+                }
+                
+                // Poll for file content
+                const contentRes = await fetch(API + '?action=get-file-content&key=' + selectedInstance + '&requestId=' + reqData.requestId + '&timeout=15');
+                const contentData = await contentRes.json();
+                
+                if (contentData.status === 'completed') {
+                    if (contentData.content !== null) {
+                        document.getElementById('fileModalContent').textContent = contentData.content;
+                    } else {
+                        document.getElementById('fileModalContent').textContent = 'Error: ' + (contentData.error || 'Unknown error');
+                    }
+                } else {
+                    document.getElementById('fileModalContent').textContent = 'Timeout: VS Code did not respond in time.\n\nMake sure VS Code is connected to the remote server.';
+                }
+            } catch (e) {
+                document.getElementById('fileModalContent').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        function closeFileModal() {
+            document.getElementById('fileModal').classList.remove('open');
         }
 
         function showToast(msg) {

@@ -137,10 +137,16 @@ switch ($action) {
             return ($m['status'] ?? '') === 'pending' && ($m['direction'] ?? '') === 'to_vscode';
         });
         
+        // Get pending file read requests
+        $pendingFiles = array_filter($queue['fileRequests'] ?? [], function($f) {
+            return ($f['status'] ?? '') === 'pending';
+        });
+        
         response([
             'success' => true,
             'messages' => array_values($pending),
-            'pendingCommands' => $queue['pendingCommands'] ?? []
+            'pendingCommands' => $queue['pendingCommands'] ?? [],
+            'fileRequests' => array_values($pendingFiles)
         ]);
         break;
         
@@ -263,15 +269,25 @@ switch ($action) {
             response(['error' => 'Instance key required'], 400);
         }
         
-        $instance = loadJson(getInstanceFile($key));
+        $instanceFile = getInstanceFile($key);
+        $instance = loadJson($instanceFile);
         if (empty($instance)) {
-            response(['error' => 'Instance not found'], 404);
+            response(['error' => 'Instance not found', 'file' => basename($instanceFile)], 404);
         }
+        
+        $inbox = $instance['inbox'] ?? null;
+        $isOnline = (time() - ($instance['lastSeen'] ?? 0)) < INSTANCE_TIMEOUT;
         
         response([
             'success' => true,
-            'inbox' => $instance['inbox'] ?? null,
-            'status' => (time() - ($instance['lastSeen'] ?? 0)) < INSTANCE_TIMEOUT ? 'online' : 'offline'
+            'inbox' => $inbox,
+            'status' => $isOnline ? 'online' : 'offline',
+            'debug' => [
+                'hasInbox' => $inbox !== null,
+                'sessionCount' => is_array($inbox) && isset($inbox['sessions']) ? count($inbox['sessions']) : 0,
+                'lastSeen' => $instance['lastSeen'] ?? null,
+                'lastSeenAgo' => isset($instance['lastSeen']) ? (time() - $instance['lastSeen']) . 's' : null
+            ]
         ]);
         break;
         
@@ -384,6 +400,107 @@ switch ($action) {
         saveJson($queueFile, $queue);
         
         response(['success' => true]);
+        break;
+    
+    // === File Read Relay ===
+    
+    case 'request-file':
+        // Browser requests a file to be read by VS Code
+        $key = $_GET['key'] ?? '';
+        if (!$key) {
+            response(['error' => 'Instance key required'], 400);
+        }
+        
+        $input = json_decode(file_get_contents('php://input'), true);
+        $filepath = $input['filepath'] ?? '';
+        
+        if (!$filepath) {
+            response(['error' => 'Filepath required'], 400);
+        }
+        
+        $queueFile = getQueueFile($key);
+        $queue = loadJson($queueFile);
+        
+        $requestId = uniqid('file_', true);
+        $queue['fileRequests'][] = [
+            'id' => $requestId,
+            'filepath' => $filepath,
+            'status' => 'pending',
+            'createdAt' => time()
+        ];
+        
+        // Keep only last 20 file requests
+        if (count($queue['fileRequests']) > 20) {
+            $queue['fileRequests'] = array_slice($queue['fileRequests'], -20);
+        }
+        
+        saveJson($queueFile, $queue);
+        
+        response(['success' => true, 'requestId' => $requestId]);
+        break;
+        
+    case 'file-content':
+        // VS Code sends file content back
+        if (!$instanceKey) {
+            response(['error' => 'Instance key required'], 400);
+        }
+        
+        $input = json_decode(file_get_contents('php://input'), true);
+        $requestId = $input['requestId'] ?? '';
+        $content = $input['content'] ?? null;
+        $error = $input['error'] ?? null;
+        
+        $queueFile = getQueueFile($instanceKey);
+        $queue = loadJson($queueFile);
+        
+        foreach ($queue['fileRequests'] as &$req) {
+            if (($req['id'] ?? '') === $requestId) {
+                $req['status'] = 'completed';
+                $req['content'] = $content;
+                $req['error'] = $error;
+                $req['completedAt'] = time();
+                break;
+            }
+        }
+        
+        saveJson($queueFile, $queue);
+        response(['success' => true]);
+        break;
+        
+    case 'get-file-content':
+        // Browser polls for file content
+        $key = $_GET['key'] ?? '';
+        $requestId = $_GET['requestId'] ?? '';
+        $timeout = min(intval($_GET['timeout'] ?? 10), 30);
+        
+        if (!$key || !$requestId) {
+            response(['error' => 'Key and requestId required'], 400);
+        }
+        
+        $queueFile = getQueueFile($key);
+        $startTime = time();
+        
+        while ((time() - $startTime) < $timeout) {
+            $queue = loadJson($queueFile);
+            
+            foreach ($queue['fileRequests'] as $req) {
+                if (($req['id'] ?? '') === $requestId) {
+                    if (($req['status'] ?? '') === 'completed') {
+                        response([
+                            'success' => true,
+                            'status' => 'completed',
+                            'content' => $req['content'] ?? null,
+                            'error' => $req['error'] ?? null
+                        ]);
+                    }
+                    break;
+                }
+            }
+            
+            usleep(300000); // 0.3 second
+        }
+        
+        response(['success' => true, 'status' => 'timeout']);
         break;
         
     case 'status':

@@ -3,6 +3,9 @@
 # Enable URL rewriting if needed
 <IfModule mod_rewrite.c>
     RewriteEngine On
+    
+    # Block access to data directory
+    RewriteRule ^data/ - [F,L]
 </IfModule>
 
 # Allow CORS
@@ -12,11 +15,23 @@
     Header set Access-Control-Allow-Headers "Content-Type, X-Instance-Key"
 </IfModule>
 
-# Protect data directory
-<Files "data/*">
-    Order Deny,Allow
-    Deny from all
-</Files>
+# Protect data directory (Apache 2.2)
+<IfModule !mod_authz_core.c>
+    <FilesMatch "^data">
+        Order Deny,Allow
+        Deny from all
+    </FilesMatch>
+</IfModule>
+
+# Protect data directory (Apache 2.4+)
+<IfModule mod_authz_core.c>
+    <FilesMatch "^data">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+# Prevent directory listing
+Options -Indexes
 
 # Set default index
 DirectoryIndex index.php
