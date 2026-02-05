@@ -1,8 +1,9 @@
 {
-	"name": "remote-chat-control",
-	"displayName": "Remote Chat Control",
+	"name": "vscodemobile",
+	"displayName": "VS Code Mobile",
 	"description": "Control VS Code AI Chat remotely via mobile-friendly browser interface with WebSocket support",
 	"version": "0.1.0",
+	"publisher": "vscodemobile",
 	"engines": {
 		"vscode": "^1.93.0"
 	},
@@ -65,16 +66,6 @@
 			{
 				"command": "remoteChatControl.clearHistory",
 				"title": "Remote Chat: Clear History"
-			},
-			{
-				"command": "remoteChatControl.connectRemote",
-				"title": "Remote Chat: Connect to Server",
-				"icon": "$(cloud-upload)"
-			},
-			{
-				"command": "remoteChatControl.disconnectRemote",
-				"title": "Remote Chat: Disconnect from Server",
-				"icon": "$(cloud-download)"
 			}
 		],
 		"configuration": {
@@ -94,11 +85,6 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Auto-start server on extension activation"
-				},
-				"remoteChatControl.remoteServerUrl": {
-					"type": "string",
-					"default": "",
-					"description": "Remote PHP server URL for controlling VS Code from anywhere"
 				}
 			}
 		}
