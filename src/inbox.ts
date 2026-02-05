@@ -184,7 +184,7 @@ function parseSessionFile(filePath: string): ChatSession | null {
                 
                 // Extract assistant response with thinking and file operations
                 let assistantText = '';
-                let thinking: ThinkingPart | undefined;
+                const thinkingParts: ThinkingPart[] = [];
                 let pendingCommand: PendingCommand | undefined;
                 
                 // Collect file URI mappings from tool invocations
@@ -224,10 +224,12 @@ function parseSessionFile(filePath: string): ChatSession | null {
                     // Build text from all response items
                     for (const item of request.response) {
                         if (item.kind === 'thinking' && item.value && item.value.trim()) {
-                            thinking = {
+                            // Collect all thinking items (there can be multiple)
+                            thinkingParts.push({
                                 title: item.generatedTitle || 'Thinking...',
-                                content: item.value.trim()
-                            };
+                                content: item.value.trim(),
+                                id: item.id
+                            });
                         } else if (item.kind === 'inlineReference' && item.inlineReference) {
                             const ref = item.inlineReference;
                             let fp = ref.fsPath || ref.path || '';
@@ -260,25 +262,32 @@ function parseSessionFile(filePath: string): ChatSession | null {
                 }
                 
                 if (assistantText.trim() || pendingCommand) {
+                    const assistantTimestamp = request.result?.timings?.totalElapsed ? 
+                        (request.timestamp + request.result.timings.totalElapsed) : request.timestamp;
+                    
                     messages.push({
                         role: 'assistant',
                         text: assistantText.trim(),
-                        thinking,
+                        thinking: thinkingParts.length > 0 ? thinkingParts : undefined,
                         model,
                         pendingCommand,
-                        timestamp: request.result?.timings?.totalElapsed ? 
-                            (request.timestamp + request.result.timings.totalElapsed) : request.timestamp
+                        timestamp: assistantTimestamp
                     });
                 }
             }
         }
+        
+        // Calculate lastMessageAt from the last message timestamp
+        const lastMessageAt = messages.length > 0 ? 
+            (messages[messages.length - 1].timestamp || 0) : 
+            (data.creationDate || 0);
         
         return {
             sessionId: data.sessionId || path.basename(filePath).replace(/\.(json|jsonl)$/, ''),
             filePath,
             title: data.customTitle || 'Untitled Session',
             createdAt: data.creationDate || 0,
-            lastMessageAt: data.lastMessageDate || 0,
+            lastMessageAt,
             messages,
             messageCount: messages.length,
             lastModel

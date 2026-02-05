@@ -3,6 +3,7 @@
 export interface ThinkingPart {
     title: string;
     content: string;
+    id?: string;
 }
 
 export interface PendingCommand {
@@ -14,7 +15,7 @@ export interface PendingCommand {
 export interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
-    thinking?: ThinkingPart;
+    thinking?: ThinkingPart[];  // Changed to array to support multiple thinking items
     model?: string;
     timestamp?: number;
     pendingCommand?: PendingCommand;

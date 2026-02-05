@@ -1497,16 +1497,20 @@ export function getWebViewHTML(): string {
                 if (m.model) html += '<span class="message-model">' + escapeHtml(m.model.replace('copilot/', '')) + '</span>';
                 html += '</div>';
                 
-                // Thinking box
-                if (m.thinking && m.thinking.content) {
-                    const thinkingId = 'thinking-' + i;
-                    html += '<div class="thinking-box">';
-                    html += '<div class="thinking-header" onclick="toggleThinking(\\'' + thinkingId + '\\')">';
-                    html += '<span class="thinking-arrow" id="arrow-' + thinkingId + '">▶</span>';
-                    html += '<span>💭 ' + escapeHtml(m.thinking.title) + '</span>';
-                    html += '</div>';
-                    html += '<div class="thinking-content" id="' + thinkingId + '">' + escapeHtml(m.thinking.content) + '</div>';
-                    html += '</div>';
+                // Thinking boxes (can be multiple)
+                if (m.thinking && Array.isArray(m.thinking) && m.thinking.length > 0) {
+                    m.thinking.forEach((think, thinkIdx) => {
+                        if (think && think.content) {
+                            const thinkingId = 'thinking-' + i + '-' + thinkIdx;
+                            html += '<div class="thinking-box">';
+                            html += '<div class="thinking-header" onclick="toggleThinking(\\'' + thinkingId + '\\')">';
+                            html += '<span class="thinking-arrow" id="arrow-' + thinkingId + '">▶</span>';
+                            html += '<span>💭 ' + escapeHtml(think.title) + '</span>';
+                            html += '</div>';
+                            html += '<div class="thinking-content" id="' + thinkingId + '">' + escapeHtml(think.content) + '</div>';
+                            html += '</div>';
+                        }
+                    });
                 }
                 
                 html += '<div class="message-content">' + linkifyFiles(escapeHtml(m.text)) + '</div>';

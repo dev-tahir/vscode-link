@@ -15,22 +15,23 @@ try {
         console.log(`  Title: ${s.title || '(no title)'}`);
         
         if (s.messages && s.messages.length > 0) {
-            // Show first and last 2 messages
-            console.log('  First messages:');
-            s.messages.slice(0, 2).forEach((m, idx) => {
-                console.log(`    ${idx+1}. [${m.role}] ${m.text.substring(0, 70)}...`);
+            // Show last 3 messages to see recent updates
+            console.log('  Last 3 messages:');
+            s.messages.slice(-3).forEach((m, idx) => {
+                const msgIdx = s.messages.length - 3 + idx + 1;
+                const thinkCount = m.thinking ? m.thinking.length : 0;
+                const thinkInfo = thinkCount > 0 ? ` [${thinkCount} thinking]` : '';
+                const timestamp = m.timestamp ? new Date(m.timestamp).toLocaleString() : 'no timestamp';
+                console.log(`    ${msgIdx}. [${m.role}]${thinkInfo} ${timestamp}`);
+                console.log(`        ${m.text.substring(0, 60)}...`);
+                
+                // Show thinking titles if present
+                if (m.thinking && m.thinking.length > 0) {
+                    m.thinking.forEach((t, ti) => {
+                        console.log(`        💭 ${t.title}`);
+                    });
+                }
             });
-            
-            if (s.messages.length > 4) {
-                console.log(`  ... (${s.messages.length - 4} more) ...`);
-            }
-            
-            if (s.messages.length > 2) {
-                console.log('  Last messages:');
-                s.messages.slice(-2).forEach((m, idx) => {
-                    console.log(`    ${s.messages.length - 1 + idx}. [${m.role}] ${m.text.substring(0, 70)}...`);
-                });
-            }
         }
     });
 } catch (err) {
