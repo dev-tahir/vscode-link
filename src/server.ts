@@ -143,7 +143,7 @@ function startFileWatcher() {
     
     try {
         fileWatcher = fs.watch(chatSessionsPath, { persistent: false, recursive: true }, (eventType, filename) => {
-            if (filename && filename.endsWith('.json')) {
+            if (filename && (filename.endsWith('.json') || filename.endsWith('.jsonl'))) {
                 // Debounce - don't broadcast more than once per second
                 const now = Date.now();
                 if (now - lastBroadcastTime < 1000) return;
@@ -987,7 +987,7 @@ async function scanChatSessionsFolder(folderPath: string) {
         const files = fs.readdirSync(folderPath, { withFileTypes: true });
         
         for (const file of files) {
-            if (file.isFile() && file.name.endsWith('.json')) {
+            if (file.isFile() && (file.name.endsWith('.json') || file.name.endsWith('.jsonl'))) {
                 const filePath = path.join(folderPath, file.name);
                 const stats = fs.statSync(filePath);
                 

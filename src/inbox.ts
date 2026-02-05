@@ -50,7 +50,7 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
     
     try {
         const files = fs.readdirSync(chatSessionsPath, { withFileTypes: true })
-            .filter(f => f.isFile() && f.name.endsWith('.json'));
+            .filter(f => f.isFile() && (f.name.endsWith('.json') || f.name.endsWith('.jsonl')));
         
         for (const file of files) {
             const filePath = path.join(chatSessionsPath, file.name);
@@ -72,11 +72,68 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
     return inbox;
 }
 
-// Parse a single session JSON file
+// Parse JSONL format (JSON Lines) where each line is a JSON object
+function parseJSONL(content: string): any {
+    const lines = content.trim().split('\n');
+    let data: any = {};
+    
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        
+        try {
+            const obj = JSON.parse(line);
+            
+            if (obj.kind === 0) {
+                // Initial data - merge with existing data
+                data = { ...data, ...obj.v };
+            } else if (obj.kind === 1) {
+                // Field update - set nested field
+                if (obj.k && Array.isArray(obj.k)) {
+                    setNestedProperty(data, obj.k, obj.v);
+                }
+            } else if (obj.kind === 2) {
+                // Array/complex update - set nested field
+                if (obj.k && Array.isArray(obj.k)) {
+                    setNestedProperty(data, obj.k, obj.v);
+                }
+            }
+        } catch (e) {
+            // Skip invalid lines
+            console.error('Error parsing JSONL line:', e);
+        }
+    }
+    
+    return data;
+}
+
+// Helper function to set a nested property using a path array
+function setNestedProperty(obj: any, path: string[], value: any) {
+    let current = obj;
+    for (let i = 0; i < path.length - 1; i++) {
+        const key = path[i];
+        if (!(key in current)) {
+            current[key] = {};
+        }
+        current = current[key];
+    }
+    const lastKey = path[path.length - 1];
+    current[lastKey] = value;
+}
+
+// Parse a single session JSON or JSONL file
 function parseSessionFile(filePath: string): ChatSession | null {
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
-        const data = JSON.parse(content);
+        
+        // Check if it's JSONL format (multiple JSON objects, one per line)
+        let data: any;
+        if (filePath.endsWith('.jsonl')) {
+            // Parse JSONL format - each line is a JSON object
+            data = parseJSONL(content);
+        } else {
+            // Parse regular JSON format
+            data = JSON.parse(content);
+        }
         
         const messages: ChatMessage[] = [];
         let lastModel: string | undefined;
@@ -153,9 +210,17 @@ function parseSessionFile(filePath: string): ChatSession | null {
                             fp = fp.replace(/\\/g, '/');
                             const fileName = item.name || fp.split('/').pop() || 'file';
                             assistantText += `[[FILE|${fp}|${fileName}]]`;
-                        } else if (item.value && typeof item.value === 'string' && 
-                                 (!item.kind || item.kind === 'markdownContent')) {
-                            assistantText += item.value;
+                        } else if (item.value && typeof item.value === 'string') {
+                            // Handle text responses - new format may not have 'kind' or uses various kinds
+                            // Skip non-text response types
+                            if (!item.kind || 
+                                item.kind === 'markdownContent' || 
+                                item.kind === 'textEditGroup' ||
+                                (item.kind !== 'mcpServersStarting' && 
+                                 item.kind !== 'progressTaskSerialized' &&
+                                 item.kind !== 'toolInvocationSerialized')) {
+                                assistantText += item.value;
+                            }
                         }
                     }
                     
@@ -182,7 +247,7 @@ function parseSessionFile(filePath: string): ChatSession | null {
         }
         
         return {
-            sessionId: data.sessionId || path.basename(filePath, '.json'),
+            sessionId: data.sessionId || path.basename(filePath).replace(/\.(json|jsonl)$/, ''),
             filePath,
             title: data.customTitle || 'Untitled Session',
             createdAt: data.creationDate || 0,
@@ -210,7 +275,7 @@ export function getAllWorkspacesWithChats(): Array<{hash: string, chatSessionsPa
             const chatSessionsPath = path.join(workspaceStoragePath, folder.name, 'chatSessions');
             if (fs.existsSync(chatSessionsPath)) {
                 const stats = fs.statSync(chatSessionsPath);
-                const files = fs.readdirSync(chatSessionsPath).filter(f => f.endsWith('.json'));
+                const files = fs.readdirSync(chatSessionsPath).filter(f => f.endsWith('.json') || f.endsWith('.jsonl'));
                 workspaces.push({
                     hash: folder.name,
                     chatSessionsPath,
