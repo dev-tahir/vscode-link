@@ -92,9 +92,16 @@ function parseJSONL(content: string): any {
                     setNestedProperty(data, obj.k, obj.v);
                 }
             } else if (obj.kind === 2) {
-                // Array/complex update - set nested field
-                if (obj.k && Array.isArray(obj.k)) {
-                    setNestedProperty(data, obj.k, obj.v);
+                // Array/complex update
+                if (obj.k && Array.isArray(obj.k) && obj.k.length > 0) {
+                    // Special handling for top-level array updates (appending)
+                    if (obj.k.length === 1 && Array.isArray(obj.v) && Array.isArray(data[obj.k[0]])) {
+                        // Append array elements instead of replacing
+                        data[obj.k[0]].push(...obj.v);
+                    } else {
+                        // For nested paths, use setNestedProperty
+                        setNestedProperty(data, obj.k, obj.v);
+                    }
                 }
             }
         } catch (e) {
@@ -111,9 +118,24 @@ function setNestedProperty(obj: any, path: string[], value: any) {
     let current = obj;
     for (let i = 0; i < path.length - 1; i++) {
         const key = path[i];
+        const nextKey = path[i + 1];
+        
+        // Check if next key is a number (array index)
+        const nextIsArrayIndex = /^\d+$/.test(nextKey);
+        
         if (!(key in current)) {
-            current[key] = {};
+            // Initialize as array if next key is numeric, otherwise as object
+            current[key] = nextIsArrayIndex ? [] : {};
         }
+        
+        // If current[key] is an array and nextKey is numeric, ensure array is long enough
+        if (Array.isArray(current[key]) && nextIsArrayIndex) {
+            const index = parseInt(nextKey);
+            while (current[key].length <= index) {
+                current[key].push({});
+            }
+        }
+        
         current = current[key];
     }
     const lastKey = path[path.length - 1];
@@ -140,6 +162,11 @@ function parseSessionFile(filePath: string): ChatSession | null {
         
         if (data.requests && Array.isArray(data.requests)) {
             for (const request of data.requests) {
+                // Skip undefined or null requests
+                if (!request || typeof request !== 'object') {
+                    continue;
+                }
+                
                 const model = request.modelId || undefined;
                 if (model) lastModel = model;
                 
