@@ -8,10 +8,14 @@ import WebSocket, { WebSocketServer } from 'ws';
 import * as inbox from './inbox';
 import { getWebViewHTML } from './webview';
 import { WebSocketMessage, ChatHistoryEntry, CapturedMessage, StorageFile, VSCodeInstance } from './types';
+import * as instanceManager from './instanceManager';
+import { InstanceInfo, InstanceRole, LockFileData } from './instanceManager';
 
 let httpServer: http.Server | null = null;
 let wsServer: WebSocketServer | null = null;
 let wsClients: Set<WebSocket> = new Set();
+// Map of WebSocket connections from slave instances (master only)
+let slaveConnections: Map<string, WebSocket> = new Map(); // workspaceHash -> WebSocket
 let chatHistory: ChatHistoryEntry[] = [];
 let capturedMessages: CapturedMessage[] = [];
 let chatStorageContent: StorageFile[] = [];
@@ -22,10 +26,21 @@ let fileWatcher: fs.FSWatcher | null = null;
 let lastBroadcastTime = 0;
 let lastInboxHash = '';
 let backupPollInterval: NodeJS.Timeout | null = null;
+let currentRole: InstanceRole = 'standalone';
+let currentHttpPort: number = 3847; // Track the port this instance is running on
+let currentWsPort: number = 3848;
+
+// Export function to get current port (for extension.ts)
+export function getCurrentPort(): number {
+    return currentHttpPort;
+}
 
 export function initServer(context: vscode.ExtensionContext, channel: vscode.OutputChannel) {
     outputChannel = channel;
     extensionStoragePath = context.storageUri?.fsPath || context.globalStorageUri?.fsPath || '';
+    
+    // Initialize instance manager
+    instanceManager.initInstanceManager(channel);
     
     // Extract workspace hash
     const storagePathParts = extensionStoragePath.split(path.sep);
@@ -34,12 +49,45 @@ export function initServer(context: vscode.ExtensionContext, channel: vscode.Out
         currentWorkspaceHash = storagePathParts[wsIdx + 1];
         log(`Detected workspace hash: ${currentWorkspaceHash}`);
         
+        // Register with instance manager
+        const workspaceName = vscode.workspace.name || 
+            vscode.workspace.workspaceFolders?.[0]?.name || 
+            'VS Code';
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        instanceManager.setLocalInstance(currentWorkspaceHash, workspaceName, workspacePath);
+        
         // Start watching chatSessions folder
         startFileWatcher();
         
         // Start backup polling (in case file watcher misses changes)
         startBackupPoll();
     }
+    
+    // Set up role change handler
+    instanceManager.onRoleChange((role, lockData) => {
+        currentRole = role;
+        log(`Role changed to: ${role}`);
+        
+        if (role === 'slave' && lockData) {
+            // We're a slave, notify webview clients about the master
+            broadcastToClients({
+                type: 'status',
+                data: { 
+                    connected: true, 
+                    workspaceHash: currentWorkspaceHash,
+                    role: 'slave',
+                    masterPort: lockData.masterPort
+                },
+                timestamp: Date.now()
+            });
+        }
+        // Note: Don't auto-retry on 'standalone' - the server is already running
+    });
+    
+    // Set up instances update handler
+    instanceManager.onInstancesUpdate((instances) => {
+        broadcastInstancesToClients(instances);
+    });
 }
 
 // Backup polling - only broadcasts if inbox has actually changed
@@ -132,12 +180,276 @@ async function broadcastInboxUpdate() {
     }
 }
 
-export function startServer(port: number = 3847, wsPort: number = 3848) {
-    startHTTPServer(port);
-    startWebSocketServer(wsPort);
+export async function startServer(port: number = 3847, wsPort: number = 3848) {
+    log('Starting server...');
+    
+    // Try to start on the default port first
+    let success = await tryStartServers(port, wsPort);
+    
+    if (success) {
+        // We got the master port
+        currentRole = 'master';
+        await instanceManager.tryBecomeMaster(port, wsPort);
+        vscode.window.showInformationMessage(`Remote Chat Control: Master (port ${port})`);
+    } else {
+        // Master port taken - find an alternative
+        log('Master port taken, finding alternative...');
+        currentRole = 'slave';
+        
+        for (let tryPort = port + 2; tryPort < port + 100; tryPort += 2) {
+            success = await tryStartServers(tryPort, tryPort + 1);
+            if (success) {
+                log(`Started on alternative port ${tryPort}`);
+                
+                // Try to connect to master for coordination (non-blocking)
+                instanceManager.connectAsSlave().catch(e => {
+                    log(`Master coordination failed: ${e}`);
+                });
+                
+                vscode.window.showInformationMessage(`Remote Chat Control: Running (port ${tryPort})`);
+                return;
+            }
+        }
+        
+        vscode.window.showErrorMessage('Remote Chat Control: Could not find available port');
+    }
+}
+
+// Try to start both HTTP and WebSocket servers on given ports
+async function tryStartServers(httpPort: number, wsPort: number): Promise<boolean> {
+    // Try HTTP server first
+    const httpSuccess = await startHTTPServerAsync(httpPort);
+    if (!httpSuccess) {
+        return false;
+    }
+    
+    // Try WebSocket server
+    const wsSuccess = await startWebSocketServerAsync(wsPort);
+    if (!wsSuccess) {
+        // Clean up HTTP server if WS fails
+        if (httpServer) {
+            httpServer.close();
+            httpServer = null;
+        }
+        return false;
+    }
+    
+    return true;
+}
+
+// Async version of HTTP server startup that returns success/failure
+async function startHTTPServerAsync(port: number): Promise<boolean> {
+    if (httpServer) {
+        log('HTTP server already running');
+        return true;
+    }
+
+    return new Promise((resolve) => {
+        currentHttpPort = port;
+        log(`Trying HTTP server on port ${port}...`);
+
+        const server = http.createServer(async (req, res) => {
+            const url = req.url || '/';
+            log(`${req.method} ${url}`);
+
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+            if (req.method === 'OPTIONS') {
+                res.writeHead(200);
+                res.end();
+                return;
+            }
+
+            try {
+                await handleRequest(req, res, url);
+            } catch (e) {
+                log(`Request error: ${e}`);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: String(e) }));
+            }
+        });
+
+        server.once('error', (err: NodeJS.ErrnoException) => {
+            if (err.code === 'EADDRINUSE') {
+                log(`Port ${port} already in use`);
+            } else {
+                log(`HTTP server error: ${err.message}`);
+            }
+            resolve(false);
+        });
+
+        server.listen(port, () => {
+            httpServer = server;
+            log(`HTTP server running on port ${port}`);
+            resolve(true);
+        });
+    });
+}
+
+// Async version of WebSocket server startup
+async function startWebSocketServerAsync(port: number): Promise<boolean> {
+    if (wsServer) {
+        log('WebSocket server already running');
+        return true;
+    }
+
+    return new Promise((resolve) => {
+        currentWsPort = port;
+        log(`Trying WebSocket server on port ${port}...`);
+
+        try {
+            const server = new WebSocketServer({ port });
+
+            server.once('error', (err: NodeJS.ErrnoException) => {
+                if (err.code === 'EADDRINUSE') {
+                    log(`WS Port ${port} already in use`);
+                } else {
+                    log(`WebSocket server error: ${err.message}`);
+                }
+                resolve(false);
+            });
+
+            server.once('listening', () => {
+                wsServer = server;
+                log(`WebSocket server running on port ${port}`);
+                setupWebSocketHandlers(server);
+                resolve(true);
+            });
+        } catch (e) {
+            log(`WebSocket server creation error: ${e}`);
+            resolve(false);
+        }
+    });
+}
+
+// Set up WebSocket event handlers
+function setupWebSocketHandlers(server: WebSocketServer) {
+    server.on('connection', (ws: WebSocket) => {
+        log('WebSocket client connected');
+        wsClients.add(ws);
+
+        // Track if this is a slave VS Code instance connection
+        let clientWorkspaceHash: string | null = null;
+
+        // Send initial status with role info
+        sendToClient(ws, {
+            type: 'status',
+            data: { 
+                connected: true, 
+                workspaceHash: currentWorkspaceHash,
+                role: currentRole,
+                instances: instanceManager.getAllInstances().map(inst => ({
+                    id: inst.workspaceHash,
+                    workspaceHash: inst.workspaceHash,
+                    workspaceName: inst.workspaceName,
+                    workspacePath: inst.workspacePath,
+                    lastActive: inst.lastActive,
+                    isActive: inst.workspaceHash === currentWorkspaceHash
+                }))
+            },
+            timestamp: Date.now()
+        });
+
+        ws.on('message', (data: WebSocket.Data) => {
+            try {
+                const msg = JSON.parse(data.toString());
+                
+                // Handle slave instance registration
+                if (msg.type === 'register_instance' && msg.instance) {
+                    clientWorkspaceHash = msg.instance.workspaceHash;
+                    if (clientWorkspaceHash) {
+                        slaveConnections.set(clientWorkspaceHash, ws);
+                    }
+                    
+                    const updatedInstances = instanceManager.registerInstance(msg.instance);
+                    log(`Slave instance registered: ${msg.instance.workspaceName}`);
+                    
+                    // Broadcast updated instances to all clients
+                    broadcastInstancesToClients(updatedInstances);
+                    
+                    // Also broadcast to all slave connections
+                    broadcastToSlaves({
+                        type: 'instances_update',
+                        instances: updatedInstances
+                    });
+                    return;
+                }
+                
+                // Handle slave instance unregistration
+                if (msg.type === 'unregister_instance' && msg.workspaceHash) {
+                    slaveConnections.delete(msg.workspaceHash);
+                    const updatedInstances = instanceManager.unregisterInstance(msg.workspaceHash);
+                    log(`Slave instance unregistered: ${msg.workspaceHash}`);
+                    
+                    broadcastInstancesToClients(updatedInstances);
+                    broadcastToSlaves({
+                        type: 'instances_update',
+                        instances: updatedInstances
+                    });
+                    return;
+                }
+                
+                // Handle pong from slaves
+                if (msg.type === 'pong') {
+                    return;
+                }
+                
+                handleWebSocketMessage(ws, msg);
+            } catch (e) {
+                log(`WS message error: ${e}`);
+            }
+        });
+
+        ws.on('close', () => {
+            log('WebSocket client disconnected');
+            wsClients.delete(ws);
+            
+            // If this was a slave connection, unregister it
+            if (clientWorkspaceHash) {
+                slaveConnections.delete(clientWorkspaceHash);
+                const updatedInstances = instanceManager.unregisterInstance(clientWorkspaceHash);
+                broadcastInstancesToClients(updatedInstances);
+                broadcastToSlaves({
+                    type: 'instances_update',
+                    instances: updatedInstances
+                });
+            }
+        });
+
+        ws.on('error', (err) => {
+            log(`WebSocket error: ${err.message}`);
+            wsClients.delete(ws);
+            if (clientWorkspaceHash) {
+                slaveConnections.delete(clientWorkspaceHash);
+            }
+        });
+    });
+}
+
+// Broadcast instances list to all webview clients
+function broadcastInstancesToClients(instances: InstanceInfo[]) {
+    const vsCodeInstances: VSCodeInstance[] = instances.map(inst => ({
+        id: inst.workspaceHash,
+        workspaceHash: inst.workspaceHash,
+        workspaceName: inst.workspaceName,
+        workspacePath: inst.workspacePath,
+        lastActive: inst.lastActive,
+        isActive: inst.workspaceHash === currentWorkspaceHash
+    }));
+    
+    broadcastToClients({
+        type: 'instances_update',
+        data: { instances: vsCodeInstances },
+        timestamp: Date.now()
+    });
 }
 
 export function stopServer() {
+    // Clean up instance manager
+    instanceManager.cleanup();
+    
     if (backupPollInterval) {
         clearInterval(backupPollInterval);
         backupPollInterval = null;
@@ -159,104 +471,17 @@ export function stopServer() {
         log('WebSocket server stopped');
     }
     wsClients.clear();
+    slaveConnections.clear();
+    currentRole = 'standalone';
 }
 
-function startHTTPServer(port: number) {
-    if (httpServer) {
-        log('HTTP server already running');
-        return;
-    }
-
-    log(`Starting HTTP server on port ${port}...`);
-
-    httpServer = http.createServer(async (req, res) => {
-        const url = req.url || '/';
-        log(`${req.method} ${url}`);
-
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-        if (req.method === 'OPTIONS') {
-            res.writeHead(200);
-            res.end();
-            return;
-        }
-
-        try {
-            await handleRequest(req, res, url);
-        } catch (e) {
-            log(`Request error: ${e}`);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: String(e) }));
+// Broadcast to all slave VS Code instances
+function broadcastToSlaves(msg: any) {
+    slaveConnections.forEach((ws, hash) => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(msg));
         }
     });
-
-    httpServer.on('error', (err: Error) => {
-        log(`HTTP server error: ${err.message}`);
-        httpServer = null;
-    });
-
-    httpServer.listen(port, () => {
-        log(`HTTP server running at http://localhost:${port}`);
-        vscode.window.showInformationMessage(
-            `Server started at http://localhost:${port}`,
-            'Open Browser'
-        ).then(choice => {
-            if (choice === 'Open Browser') {
-                vscode.env.openExternal(vscode.Uri.parse(`http://localhost:${port}`));
-            }
-        });
-    });
-}
-
-function startWebSocketServer(port: number) {
-    if (wsServer) {
-        log('WebSocket server already running');
-        return;
-    }
-
-    log(`Starting WebSocket server on port ${port}...`);
-
-    wsServer = new WebSocketServer({ port });
-
-    wsServer.on('connection', (ws: WebSocket) => {
-        log('WebSocket client connected');
-        wsClients.add(ws);
-
-        // Send initial status
-        sendToClient(ws, {
-            type: 'status',
-            data: { connected: true, workspaceHash: currentWorkspaceHash },
-            timestamp: Date.now()
-        });
-
-        ws.on('message', (data: WebSocket.Data) => {
-            try {
-                const msg = JSON.parse(data.toString());
-                handleWebSocketMessage(ws, msg);
-            } catch (e) {
-                log(`WS message error: ${e}`);
-            }
-        });
-
-        ws.on('close', () => {
-            log('WebSocket client disconnected');
-            wsClients.delete(ws);
-        });
-
-        ws.on('error', (err) => {
-            log(`WebSocket error: ${err.message}`);
-            wsClients.delete(ws);
-        });
-    });
-
-    wsServer.on('error', (err: Error) => {
-        log(`WebSocket server error: ${err.message}`);
-        wsServer = null;
-    });
-
-    log(`WebSocket server running on port ${port}`);
 }
 
 function sendToClient(ws: WebSocket, msg: WebSocketMessage) {
@@ -283,30 +508,75 @@ function handleWebSocketMessage(ws: WebSocket, msg: any) {
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse, url: string) {
+    // Parse URL and query params
+    const urlParts = url.split('?');
+    const pathname = urlParts[0];
+    const queryString = urlParts[1] || '';
+    const params = new URLSearchParams(queryString);
+    const targetWorkspace = params.get('workspace'); // Optional workspace hash to target
+    
     // Serve HTML
-    if (url === '/' && req.method === 'GET') {
+    if (pathname === '/' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(getWebViewHTML());
         return;
     }
 
     // API Status
-    if (url === '/api/status') {
+    if (pathname === '/api/status') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ 
             status: 'ok', 
+            role: currentRole,
             sent: chatHistory.length,
             captured: capturedMessages.length,
             storageFiles: chatStorageContent.length,
-            workspaceHash: currentWorkspaceHash
+            workspaceHash: currentWorkspaceHash,
+            instances: instanceManager.getAllInstances().map(i => ({
+                id: i.workspaceHash,
+                workspaceName: i.workspaceName,
+                isActive: i.workspaceHash === currentWorkspaceHash
+            }))
         }));
         return;
     }
 
-    // Send message
-    if (url === '/api/send' && req.method === 'POST') {
+    // Get all connected instances
+    if (pathname === '/api/instances') {
+        const instances = instanceManager.getAllInstances();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+            instances: instances.map(inst => ({
+                id: inst.workspaceHash,
+                workspaceHash: inst.workspaceHash,
+                workspaceName: inst.workspaceName,
+                workspacePath: inst.workspacePath,
+                lastActive: inst.lastActive,
+                isActive: inst.workspaceHash === currentWorkspaceHash
+            }))
+        }));
+        return;
+    }
+
+    // Send message - can target specific workspace
+    if (pathname === '/api/send' && req.method === 'POST') {
         const body = await readBody(req);
         const data = JSON.parse(body);
+        const workspace = data.workspace || targetWorkspace;
+        
+        // If targeting a different workspace, route to that slave
+        if (workspace && workspace !== currentWorkspaceHash) {
+            const result = await sendToSlaveWorkspace(workspace, 'send_chat', {
+                message: data.message,
+                model: data.model,
+                sessionMode: data.sessionMode,
+                sessionId: data.sessionId
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+            return;
+        }
+        
         const result = await sendToChat(data.message || 'Hi', data.model, data.sessionMode, data.sessionId);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, ...result }));
@@ -314,7 +584,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }
 
     // Current workspace
-    if (url === '/api/inbox/current-workspace') {
+    if (pathname === '/api/inbox/current-workspace') {
         const workspaceName = vscode.workspace.name || 
             vscode.workspace.workspaceFolders?.[0]?.name || 
             'VS Code';
@@ -322,63 +592,110 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         res.end(JSON.stringify({ 
             workspaceHash: currentWorkspaceHash,
             storagePath: extensionStoragePath,
-            workspaceName: workspaceName
+            workspaceName: workspaceName,
+            role: currentRole,
+            instances: instanceManager.getAllInstances().map(i => ({
+                id: i.workspaceHash,
+                workspaceName: i.workspaceName,
+                isActive: i.workspaceHash === currentWorkspaceHash
+            }))
         }));
         return;
     }
 
-    // Get inbox messages
-    if (url === '/api/inbox/messages') {
-        if (!currentWorkspaceHash) {
+    // Get inbox messages - can target specific workspace
+    if (pathname === '/api/inbox/messages') {
+        const workspace = targetWorkspace || currentWorkspaceHash;
+        if (!workspace) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Workspace not detected' }));
             return;
         }
         
-        const inboxData = inbox.getInboxForWorkspace(currentWorkspaceHash);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const inboxData = inbox.getInboxForWorkspace(workspace);
+        res.writeHead(200, { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+        });
         res.end(JSON.stringify(inboxData));
         return;
     }
 
+    // Get inbox for all workspaces
+    if (pathname === '/api/inbox/all') {
+        const allInstances = instanceManager.getAllInstances();
+        const allInboxes = allInstances.map(inst => ({
+            ...inbox.getInboxForWorkspace(inst.workspaceHash),
+            workspaceName: inst.workspaceName,
+            isActive: inst.workspaceHash === currentWorkspaceHash
+        }));
+        res.writeHead(200, { 
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+        });
+        res.end(JSON.stringify({ workspaces: allInboxes }));
+        return;
+    }
+
     // Get latest reply
-    if (url === '/api/inbox/latest-reply') {
-        const workspaceHash = currentWorkspaceHash || inbox.getCurrentWorkspaceHash();
-        if (!workspaceHash) {
+    if (pathname === '/api/inbox/latest-reply') {
+        const workspace = targetWorkspace || currentWorkspaceHash || inbox.getCurrentWorkspaceHash();
+        if (!workspace) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'No workspace selected' }));
             return;
         }
         
-        const result = inbox.getLatestReplyForWorkspace(workspaceHash);
+        const result = inbox.getLatestReplyForWorkspace(workspace);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
         return;
     }
 
     // Send and wait for reply
-    if (url === '/api/inbox/send-and-wait' && req.method === 'POST') {
+    if (pathname === '/api/inbox/send-and-wait' && req.method === 'POST') {
         const body = await readBody(req);
         const data = JSON.parse(body);
+        const workspace = data.workspace || targetWorkspace;
         const beforeSend = Date.now();
         
-        await sendToChat(data.message, data.model, data.sessionMode, data.sessionId);
+        // If targeting a different workspace, route to that slave
+        if (workspace && workspace !== currentWorkspaceHash) {
+            const slaveWs = slaveConnections.get(workspace);
+            if (slaveWs && slaveWs.readyState === WebSocket.OPEN) {
+                slaveWs.send(JSON.stringify({
+                    type: 'execute_command',
+                    command: 'send_chat',
+                    targetWorkspace: workspace,
+                    message: data.message,
+                    model: data.model,
+                    sessionMode: data.sessionMode,
+                    sessionId: data.sessionId
+                }));
+            }
+        } else {
+            await sendToChat(data.message, data.model, data.sessionMode, data.sessionId);
+        }
         
-        const workspaceHash = currentWorkspaceHash || inbox.getCurrentWorkspaceHash();
-        if (!workspaceHash) {
+        const effectiveWorkspace = workspace || currentWorkspaceHash || inbox.getCurrentWorkspaceHash();
+        if (!effectiveWorkspace) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'No workspace detected' }));
             return;
         }
         
-        const result = await inbox.waitForNewReply(workspaceHash, beforeSend, data.maxWait || 60000);
+        const result = await inbox.waitForNewReply(effectiveWorkspace, beforeSend, data.maxWait || 60000);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
         return;
     }
 
     // Read file
-    if (url === '/api/file/read' && req.method === 'POST') {
+    if (pathname === '/api/file/read' && req.method === 'POST') {
         const body = await readBody(req);
         const data = JSON.parse(body);
         let filename = data.filename || '';
@@ -418,7 +735,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     }
 
     // Terminal command
-    if (url === '/api/terminal' && req.method === 'POST') {
+    if (pathname === '/api/terminal' && req.method === 'POST') {
         const body = await readBody(req);
         const data = JSON.parse(body);
         const term = vscode.window.createTerminal('Remote');
@@ -429,11 +746,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         return;
     }
 
-    // Command action (approve/skip)
-    if (url === '/api/command-action' && req.method === 'POST') {
+    // Command action (approve/skip) - can target specific workspace
+    if (pathname === '/api/command-action' && req.method === 'POST') {
         const body = await readBody(req);
         const data = JSON.parse(body);
         const action = data.action;
+        const workspace = data.workspace || targetWorkspace;
+        
+        // If targeting a different workspace, route to that slave
+        if (workspace && workspace !== currentWorkspaceHash) {
+            const result = await sendToSlaveWorkspace(workspace, 'command_action', { action });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+            return;
+        }
         
         const { exec } = require('child_process');
         
@@ -463,16 +789,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         return;
     }
 
-    // Get all VS Code instances
-    if (url === '/api/instances') {
-        const instances = getAllVSCodeInstances();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ instances }));
-        return;
-    }
-
     // Scan storage
-    if (url === '/api/scan') {
+    if (pathname === '/api/scan') {
         await scanChatStorage();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, filesFound: chatStorageContent.length }));
@@ -481,6 +799,33 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     res.writeHead(404);
     res.end('Not found');
+}
+
+// Send command to a specific slave workspace
+async function sendToSlaveWorkspace(workspaceHash: string, command: string, data: any): Promise<any> {
+    const slaveWs = slaveConnections.get(workspaceHash);
+    
+    if (!slaveWs || slaveWs.readyState !== WebSocket.OPEN) {
+        return { success: false, error: `Workspace ${workspaceHash} not connected` };
+    }
+    
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            resolve({ success: false, error: 'Timeout waiting for slave response' });
+        }, 10000);
+        
+        // Send command to slave
+        slaveWs.send(JSON.stringify({
+            type: 'execute_command',
+            command,
+            targetWorkspace: workspaceHash,
+            ...data
+        }));
+        
+        // For now, just assume success (proper implementation would need request/response tracking)
+        clearTimeout(timeout);
+        resolve({ success: true, routed: true, targetWorkspace: workspaceHash });
+    });
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {

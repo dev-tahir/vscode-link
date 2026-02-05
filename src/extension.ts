@@ -29,9 +29,9 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('remoteChatControl.startServer', () => {
+        vscode.commands.registerCommand('remoteChatControl.startServer', async () => {
             if (!serverRunning) {
-                server.startServer();
+                await server.startServer();
                 serverRunning = true;
                 updateStatusBar();
                 log('Server started');
@@ -47,16 +47,17 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }),
         
-        vscode.commands.registerCommand('remoteChatControl.toggleServer', () => {
+        vscode.commands.registerCommand('remoteChatControl.toggleServer', async () => {
             if (serverRunning) {
                 vscode.commands.executeCommand('remoteChatControl.stopServer');
             } else {
-                vscode.commands.executeCommand('remoteChatControl.startServer');
+                await vscode.commands.executeCommand('remoteChatControl.startServer');
             }
         }),
         
         vscode.commands.registerCommand('remoteChatControl.showPanel', () => {
-            vscode.env.openExternal(vscode.Uri.parse('http://localhost:3847'));
+            const port = server.getCurrentPort();
+            vscode.env.openExternal(vscode.Uri.parse(`http://localhost:${port}`));
         }),
         
         vscode.commands.registerCommand('remoteChatControl.sendMessage', async () => {
@@ -80,10 +81,11 @@ export function activate(context: vscode.ExtensionContext) {
         });
     }
 
-    // Auto-start server by default
-    server.startServer();
-    serverRunning = true;
-    updateStatusBar();
+    // Auto-start server by default (async)
+    server.startServer().then(() => {
+        serverRunning = true;
+        updateStatusBar();
+    });
 
     vscode.window.showInformationMessage('Remote Chat Control is now active!');
     log('Extension activated');
@@ -91,8 +93,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 function updateStatusBar() {
     if (serverRunning) {
-        statusBarItem.text = '$(broadcast) Remote: ON';
-        statusBarItem.tooltip = 'Remote Chat Control - Server Running\nClick to stop';
+        const port = server.getCurrentPort();
+        statusBarItem.text = `$(broadcast) Remote: ${port}`;
+        statusBarItem.tooltip = `Remote Chat Control - Server Running on port ${port}\nClick to stop`;
         statusBarItem.backgroundColor = undefined;
     } else {
         statusBarItem.text = '$(circle-slash) Remote: OFF';

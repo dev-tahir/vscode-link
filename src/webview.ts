@@ -1126,12 +1126,14 @@ export function getWebViewHTML(): string {
 
         // WebSocket
         function connectWebSocket() {
-            const wsPort = document.getElementById('wsPort')?.value || 3848;
+            // Derive WS port from HTTP port (WS port = HTTP port + 1)
+            const httpPort = parseInt(window.location.port) || 3847;
+            const wsPort = document.getElementById('wsPort')?.value || (httpPort + 1);
             try {
                 ws = new WebSocket('ws://' + window.location.hostname + ':' + wsPort);
                 
                 ws.onopen = () => {
-                    console.log('WebSocket connected');
+                    console.log('WebSocket connected on port ' + wsPort);
                     updateStatus(true);
                 };
                 
@@ -1168,6 +1170,16 @@ export function getWebViewHTML(): string {
                 case 'message_update':
                     // Update inbox data without full UI refresh
                     if (msg.data && !msg.data.error) {
+                        // Check if this update is for the currently selected workspace
+                        const updateWorkspace = msg.data.workspaceHash;
+                        const selectedWorkspace = allInstances[selectedInstanceIndex]?.id || currentInstanceWorkspaceHash;
+                        
+                        // Only apply update if it's for the selected workspace
+                        if (updateWorkspace && selectedWorkspace && updateWorkspace !== selectedWorkspace) {
+                            console.log('Ignoring inbox update for different workspace:', updateWorkspace);
+                            return;
+                        }
+                        
                         const oldInbox = currentInbox;
                         currentInbox = msg.data;
                         
@@ -1208,7 +1220,11 @@ export function getWebViewHTML(): string {
                     }
                     break;
                 case 'instances_update':
-                    updateInstances(msg.data);
+                    if (msg.data && msg.data.instances) {
+                        updateInstances(msg.data.instances);
+                    } else if (Array.isArray(msg.data)) {
+                        updateInstances(msg.data);
+                    }
                     break;
                 case 'status':
                     updateStatus(msg.data.connected);
@@ -1252,9 +1268,10 @@ export function getWebViewHTML(): string {
             if (refreshInterval) clearInterval(refreshInterval);
             refreshInterval = setInterval(() => {
                 if (autoRefreshEnabled && !isInMessagesView) {
+                    console.log('Auto-refreshing inbox...');
                     loadInbox();
                 }
-            }, 10000);
+            }, 5000); // Reduced to 5 seconds for fresher data
         }
 
         function stopAutoRefresh() {
@@ -1273,7 +1290,12 @@ export function getWebViewHTML(): string {
         }
 
         // Inbox
+        let allInstances = [];
+        let selectedInstanceIndex = 0;
+        let currentInstanceWorkspaceHash = null; // Track the current window's hash
+        
         async function loadInbox() {
+            console.log('Loading inbox...');
             try {
                 const wsRes = await fetch(API + '/api/inbox/current-workspace');
                 const wsData = await wsRes.json();
@@ -1283,21 +1305,50 @@ export function getWebViewHTML(): string {
                     return;
                 }
                 
-                updateInstances([{ 
-                    id: wsData.workspaceHash, 
-                    workspaceName: wsData.workspaceName || 'VS Code',
-                    isActive: true 
-                }]);
+                console.log('Current workspace:', wsData.workspaceHash);
                 
-                const r = await fetch(API + '/api/inbox/messages');
+                // Save current instance hash
+                currentInstanceWorkspaceHash = wsData.workspaceHash;
+                
+                // Update instances from server response (includes all connected windows)
+                if (wsData.instances && wsData.instances.length > 0) {
+                    allInstances = wsData.instances;
+                    
+                    // Find which index is the current/active instance
+                    const currentIndex = allInstances.findIndex(inst => inst.isActive || inst.id === currentInstanceWorkspaceHash);
+                    if (currentIndex >= 0) {
+                        selectedInstanceIndex = currentIndex;
+                    }
+                    
+                    updateInstances(allInstances);
+                } else {
+                    allInstances = [{ 
+                        id: wsData.workspaceHash, 
+                        workspaceName: wsData.workspaceName || 'VS Code',
+                        isActive: true 
+                    }];
+                    selectedInstanceIndex = 0;
+                    updateInstances(allInstances);
+                }
+                
+                // Load inbox for selected instance (defaults to current instance)
+                const targetWorkspace = allInstances[selectedInstanceIndex]?.id || currentInstanceWorkspaceHash;
+                const timestamp = Date.now(); // Add timestamp to prevent caching
+                const r = await fetch(API + '/api/inbox/messages?workspace=' + encodeURIComponent(targetWorkspace) + '&_t=' + timestamp, {
+                    cache: 'no-cache',
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
                 currentInbox = await r.json();
+                
+                console.log('Loaded inbox:', currentInbox.sessions?.length || 0, 'sessions,', currentInbox.totalMessages || 0, 'total messages');
                 
                 if (currentInbox.error) {
                     document.getElementById('sessionsView').innerHTML = '<div class="placeholder-content"><div class="placeholder-text">' + escapeHtml(currentInbox.error) + '</div></div>';
                     return;
                 }
                 
-                updateInboxStatus('online', 'Inbox ready • ' + currentInbox.sessions.length + ' sessions');
+                const instanceName = allInstances[selectedInstanceIndex]?.workspaceName || 'VS Code';
+                updateInboxStatus('online', instanceName + ' • ' + currentInbox.sessions.length + ' sessions');
                 renderSessions();
                 updateSessionSelect();
                 
@@ -1317,19 +1368,45 @@ export function getWebViewHTML(): string {
         }
 
         function updateInstances(instances) {
+            allInstances = instances || [];
             const container = document.getElementById('instancesTabs');
-            container.innerHTML = instances.map((inst, i) => 
-                '<div class="instance-tab' + (inst.isActive ? ' active' : '') + '" onclick="selectInstance(' + i + ')">' + 
-                escapeHtml(inst.workspaceName || inst.id) + 
+            
+            if (allInstances.length === 0) {
+                container.innerHTML = '<div class="instance-tab active">No instances</div>';
+                return;
+            }
+            
+            // Ensure selectedInstanceIndex is valid
+            if (selectedInstanceIndex >= allInstances.length) {
+                selectedInstanceIndex = 0;
+            }
+            
+            container.innerHTML = allInstances.map((inst, i) => 
+                '<div class="instance-tab' + (i === selectedInstanceIndex ? ' active' : '') + '" onclick="selectInstance(' + i + ')" title="' + escapeHtml(inst.id || '') + '">' + 
+                escapeHtml(inst.workspaceName || inst.id || 'Unknown') + 
+                (allInstances.length > 1 ? ' <span style="opacity:0.5;font-size:10px;">(' + (i + 1) + ')</span>' : '') +
                 '</div>'
             ).join('');
         }
 
         function selectInstance(index) {
-            // For now just visual - multi-window support later
+            if (index === selectedInstanceIndex) return;
+            
+            selectedInstanceIndex = index;
             document.querySelectorAll('.instance-tab').forEach((t, i) => {
                 t.classList.toggle('active', i === index);
             });
+            
+            // Clear current selection and reload inbox for new instance
+            selectedSessionIndex = -1;
+            document.getElementById('sessionsView').innerHTML = '<div class="placeholder-content"><div class="placeholder-icon">⏳</div><div class="placeholder-title">Loading...</div></div>';
+            
+            loadInbox();
+        }
+        
+        // Get currently selected workspace hash
+        function getSelectedWorkspaceHash() {
+            return allInstances[selectedInstanceIndex]?.id || null;
         }
 
         function renderSessions() {
@@ -1661,6 +1738,10 @@ export function getWebViewHTML(): string {
                 const body = { message: msg, sessionMode, maxWait: 60000 };
                 if (model) body.model = model;
                 if (sessionId) body.sessionId = sessionId;
+                
+                // Include target workspace for multi-instance support
+                const targetWorkspace = getSelectedWorkspaceHash();
+                if (targetWorkspace) body.workspace = targetWorkspace;
                 
                 // Show loading indicator
                 showLoadingIndicator();
