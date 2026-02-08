@@ -60,40 +60,17 @@
 		],
 		"commands": [
 			{
-				"command": "remoteChatControl.startServer",
-				"title": "Remote Chat: Start Server",
-				"icon": "$(broadcast)"
-			},
-			{
-				"command": "remoteChatControl.stopServer",
-				"title": "Remote Chat: Stop Server",
-				"icon": "$(circle-slash)"
-			},
-			{
-				"command": "remoteChatControl.toggleServer",
-				"title": "Remote Chat: Toggle Server"
-			},
-			{
-				"command": "remoteChatControl.showPanel",
-				"title": "Remote Chat: Open in Browser",
-				"icon": "$(globe)"
-			},
-			{
-				"command": "remoteChatControl.sendMessage",
-				"title": "Remote Chat: Send Message"
-			},
-			{
-				"command": "remoteChatControl.clearHistory",
-				"title": "Remote Chat: Clear History"
-			},
-			{
 				"command": "remoteChatControl.connectCloud",
-				"title": "Remote Chat: Connect to Cloud Server",
+				"title": "Remote Chat: Connect to Server",
 				"icon": "$(cloud)"
 			},
 			{
 				"command": "remoteChatControl.disconnectCloud",
-				"title": "Remote Chat: Disconnect from Cloud Server"
+				"title": "Remote Chat: Disconnect from Server"
+			},
+			{
+				"command": "remoteChatControl.sendMessage",
+				"title": "Remote Chat: Send Message"
 			},
 			{
 				"command": "remoteChatControl.showOutput",
@@ -103,30 +80,15 @@
 		"configuration": {
 			"title": "Remote Chat Control",
 			"properties": {
-				"remoteChatControl.httpPort": {
-					"type": "number",
-					"default": 3847,
-					"description": "HTTP server port"
-				},
-				"remoteChatControl.wsPort": {
-					"type": "number",
-					"default": 3848,
-					"description": "WebSocket server port"
-				},
-				"remoteChatControl.autoStart": {
-					"type": "boolean",
-					"default": false,
-					"description": "Auto-start local server on extension activation"
-				},
-				"remoteChatControl.cloudServerUrl": {
+				"remoteChatControl.serverUrl": {
 					"type": "string",
 					"default": "",
-					"description": "Cloud server URL (e.g., wss://your-app.run.app)"
+					"description": "Server URL (e.g., wss://your-app.run.app or ws://localhost:8080)"
 				},
-				"remoteChatControl.cloudAutoConnect": {
+				"remoteChatControl.autoConnect": {
 					"type": "boolean",
 					"default": false,
-					"description": "Auto-connect to cloud server on startup"
+					"description": "Auto-connect to server on startup"
 				}
 			}
 		}
