@@ -1593,9 +1593,10 @@ export function getWebViewHTML(): string {
                 if (wsData.instances && wsData.instances.length > 0) {
                     allInstances = wsData.instances;
                     
+                    // Only set selectedInstanceIndex on initial load (when it's 0 and current instance is not 0)
                     // Find which index is the current/active instance
                     const currentIndex = allInstances.findIndex(inst => inst.isActive || inst.id === currentInstanceWorkspaceHash);
-                    if (currentIndex >= 0) {
+                    if (currentIndex >= 0 && selectedInstanceIndex === 0 && currentIndex !== 0) {
                         selectedInstanceIndex = currentIndex;
                     }
                     
@@ -1620,6 +1621,41 @@ export function getWebViewHTML(): string {
                 currentInbox = await r.json();
                 
                 console.log('Loaded inbox:', currentInbox.sessions?.length || 0, 'sessions,', currentInbox.totalMessages || 0, 'total messages');
+                
+                if (currentInbox.error) {
+                    document.getElementById('sessionsView').innerHTML = '<div class="placeholder-content"><div class="placeholder-text">' + escapeHtml(currentInbox.error) + '</div></div>';
+                    return;
+                }
+                
+                const instanceName = allInstances[selectedInstanceIndex]?.workspaceName || 'VS Code';
+                updateInboxStatus('online', instanceName + ' • ' + currentInbox.sessions.length + ' sessions');
+                renderSessions();
+                updateSessionSelect();
+                
+            } catch (e) {
+                updateInboxStatus('offline', 'Error: ' + e.message);
+            }
+        }
+        
+        // Load inbox for a specific instance without changing selectedInstanceIndex
+        async function loadInboxForSelectedInstance() {
+            console.log('Loading inbox for selected instance:', selectedInstanceIndex);
+            try {
+                // Don't fetch current workspace, just load inbox for the already-selected instance
+                const targetWorkspace = allInstances[selectedInstanceIndex]?.id;
+                if (!targetWorkspace) {
+                    updateInboxStatus('offline', 'Instance not found');
+                    return;
+                }
+                
+                const timestamp = Date.now(); // Add timestamp to prevent caching
+                const r = await fetch(API + '/api/inbox/messages?workspace=' + encodeURIComponent(targetWorkspace) + '&_t=' + timestamp, {
+                    cache: 'no-cache',
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
+                currentInbox = await r.json();
+                
+                console.log('Loaded inbox for instance:', currentInbox.sessions?.length || 0, 'sessions,', currentInbox.totalMessages || 0, 'total messages');
                 
                 if (currentInbox.error) {
                     document.getElementById('sessionsView').innerHTML = '<div class="placeholder-content"><div class="placeholder-text">' + escapeHtml(currentInbox.error) + '</div></div>';
@@ -1680,7 +1716,7 @@ export function getWebViewHTML(): string {
             selectedSessionIndex = -1;
             document.getElementById('sessionsView').innerHTML = '<div class="placeholder-content"><div class="placeholder-icon">⏳</div><div class="placeholder-title">Loading...</div></div>';
             
-            loadInbox();
+            loadInboxForSelectedInstance();
         }
         
         // Get currently selected workspace hash
