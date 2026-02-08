@@ -844,7 +844,7 @@ async function loadInbox() {
 
 // Send message to chat
 export async function sendToChat(message: string, model?: string, sessionMode?: string, sessionId?: string): Promise<{ result: string; note?: string }> {
-    log(`Sending message: "${message}"${model ? ` (model: ${model})` : ''}${sessionMode ? ` (mode: ${sessionMode})` : ''}`);
+    log(`Sending message: "${message}"${model ? ` (model: ${model})` : ''}${sessionMode ? ` (mode: ${sessionMode})` : ''}${sessionId ? ` (sessionId: ${sessionId})` : ''}`);
     
     chatHistory.push({
         role: 'user',
@@ -859,6 +859,10 @@ export async function sendToChat(message: string, model?: string, sessionMode?: 
             await vscode.commands.executeCommand('workbench.action.chat.newChat');
             await new Promise(r => setTimeout(r, 300));
             note = 'Created new chat';
+        } else if (sessionMode === 'session' && sessionId) {
+            // Targeting a specific session - just log it for now
+            log(`Target session: ${sessionId}`);
+            note = `Sent to session`;
         }
         
         // Use the VS Code Chat API to send message directly

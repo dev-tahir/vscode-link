@@ -2,7 +2,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { ChatMessage, ChatSession, Inbox, ThinkingPart, PendingCommand } from './types';
+import { ChatMessage, ChatSession, Inbox, ThinkingPart, PendingCommand, ThinkingSection, ToolInvocation } from './types';
 
 // Get the workspace hash for the current VS Code window
 export function getCurrentWorkspaceHash(): string | null {
@@ -185,52 +185,75 @@ function parseSessionFile(filePath: string): ChatSession | null {
                 // Extract assistant response with thinking and file operations
                 let assistantText = '';
                 const thinkingParts: ThinkingPart[] = [];
+                const toolInvocations: ToolInvocation[] = [];
                 let pendingCommand: PendingCommand | undefined;
                 
                 // Collect file URI mappings from tool invocations
                 const fileUriMap: Map<string, { path: string; name: string }> = new Map();
                 
                 if (request.response && Array.isArray(request.response)) {
-                    // Collect all file URIs from tool invocations first
+                    // First pass: collect all file URIs and process items
                     for (const item of request.response) {
-                        if (item.kind === 'toolInvocationSerialized' && item.pastTenseMessage?.uris) {
-                            for (const [uriKey, uri] of Object.entries(item.pastTenseMessage.uris) as [string, any][]) {
-                                if (uri && uri.path) {
-                                    let fp = uri.path;
-                                    if (fp.match(/^\/[a-zA-Z]:\//)) {
-                                        fp = fp.substring(1);
-                                    }
-                                    const fileName = fp.split('/').pop() || fp;
-                                    fileUriMap.set(uriKey, { path: fp, name: fileName });
-                                }
+                        // Collect thinking parts
+                        if (item.kind === 'thinking' && item.value) {
+                            // Skip empty thinking markers (vscodeReasoningDone)
+                            if (item.value.trim()) {
+                                thinkingParts.push({
+                                    id: item.id,
+                                    value: item.value.trim(),
+                                    generatedTitle: item.generatedTitle
+                                });
                             }
                         }
                         
-                        // Check for pending terminal command
-                        if (item.kind === 'toolInvocationSerialized' && 
-                            item.toolId === 'run_in_terminal' &&
-                            item.toolSpecificData?.kind === 'terminal' &&
-                            !item.isConfirmed &&
-                            !item.toolSpecificData?.terminalCommandState) {
-                            pendingCommand = {
-                                command: item.toolSpecificData.commandLine?.original || 
-                                        item.toolSpecificData.commandLine?.toolEdited || '',
-                                language: item.toolSpecificData.language,
-                                toolCallId: item.toolCallId
+                        // Collect tool invocations
+                        if (item.kind === 'toolInvocationSerialized') {
+                            const toolInvocation: ToolInvocation = {
+                                toolId: item.toolId || 'unknown',
+                                toolCallId: item.toolCallId || '',
+                                invocationMessage: item.invocationMessage?.value || '',
+                                pastTenseMessage: item.pastTenseMessage?.value || '',
+                                isConfirmed: item.isConfirmed?.type === 1,
+                                isComplete: item.isComplete || false
                             };
+                            
+                            // Handle terminal commands
+                            if (item.toolSpecificData?.kind === 'terminal') {
+                                toolInvocation.kind = 'terminal';
+                                toolInvocation.commandLine = item.toolSpecificData.commandLine?.original || 
+                                                             item.toolSpecificData.commandLine?.toolEdited || '';
+                                toolInvocation.language = item.toolSpecificData.language;
+                                toolInvocation.output = item.toolSpecificData.output || '';
+                                
+                                // Check for pending (not confirmed) commands
+                                if (!item.isConfirmed && !item.toolSpecificData.terminalCommandState && toolInvocation.commandLine) {
+                                    pendingCommand = {
+                                        command: toolInvocation.commandLine,
+                                        language: toolInvocation.language,
+                                        toolCallId: toolInvocation.toolCallId
+                                    };
+                                }
+                            }
+                            
+                            // Collect file URIs
+                            if (item.pastTenseMessage?.uris) {
+                                for (const [uriKey, uri] of Object.entries(item.pastTenseMessage.uris) as [string, any][]) {
+                                    if (uri && uri.path) {
+                                        let fp = uri.path;
+                                        if (fp.match(/^\/[a-zA-Z]:\//)) {
+                                            fp = fp.substring(1);
+                                        }
+                                        const fileName = fp.split('/').pop() || fp;
+                                        fileUriMap.set(uriKey, { path: fp, name: fileName });
+                                    }
+                                }
+                            }
+                            
+                            toolInvocations.push(toolInvocation);
                         }
-                    }
-                    
-                    // Build text from all response items
-                    for (const item of request.response) {
-                        if (item.kind === 'thinking' && item.value && item.value.trim()) {
-                            // Collect all thinking items (there can be multiple)
-                            thinkingParts.push({
-                                title: item.generatedTitle || 'Thinking...',
-                                content: item.value.trim(),
-                                id: item.id
-                            });
-                        } else if (item.kind === 'inlineReference' && item.inlineReference) {
+                        
+                        // Collect text responses
+                        if (item.kind === 'inlineReference' && item.inlineReference) {
                             const ref = item.inlineReference;
                             let fp = ref.fsPath || ref.path || '';
                             if (fp.match(/^\/[a-zA-Z]:\//)) {
@@ -240,14 +263,14 @@ function parseSessionFile(filePath: string): ChatSession | null {
                             const fileName = item.name || fp.split('/').pop() || 'file';
                             assistantText += `[[FILE|${fp}|${fileName}]]`;
                         } else if (item.value && typeof item.value === 'string') {
-                            // Handle text responses - new format may not have 'kind' or uses various kinds
-                            // Skip non-text response types
+                            // Handle text responses
                             if (!item.kind || 
-                                item.kind === 'markdownContent' || 
-                                item.kind === 'textEditGroup' ||
+                                item.kind === 'markdownContent' ||
                                 (item.kind !== 'mcpServersStarting' && 
                                  item.kind !== 'progressTaskSerialized' &&
-                                 item.kind !== 'toolInvocationSerialized')) {
+                                 item.kind !== 'toolInvocationSerialized' &&
+                                 item.kind !== 'thinking' &&
+                                 item.kind !== 'textEditGroup')) {
                                 assistantText += item.value;
                             }
                         }
@@ -261,14 +284,23 @@ function parseSessionFile(filePath: string): ChatSession | null {
                     }
                 }
                 
-                if (assistantText.trim() || pendingCommand) {
+                if (assistantText.trim() || pendingCommand || thinkingParts.length > 0 || toolInvocations.length > 0) {
                     const assistantTimestamp = request.result?.timings?.totalElapsed ? 
                         (request.timestamp + request.result.timings.totalElapsed) : request.timestamp;
+                    
+                    // Create thinking section if we have thinking or tool invocations
+                    let thinkingSection: ThinkingSection | undefined;
+                    if (thinkingParts.length > 0 || toolInvocations.length > 0) {
+                        thinkingSection = {
+                            thinkingParts,
+                            toolInvocations
+                        };
+                    }
                     
                     messages.push({
                         role: 'assistant',
                         text: assistantText.trim(),
-                        thinking: thinkingParts.length > 0 ? thinkingParts : undefined,
+                        thinking: thinkingSection,
                         model,
                         pendingCommand,
                         timestamp: assistantTimestamp

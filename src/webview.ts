@@ -8,6 +8,7 @@ export function getWebViewHTML(): string {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>VS Code Remote Control</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         :root {
             --bg-primary: #FFFFFF;
@@ -431,8 +432,286 @@ export function getWebViewHTML(): string {
             white-space: pre-wrap;
             word-break: break-word;
         }
+        
+        /* Markdown Content Styles */
+        .message-content h1 {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 12px 0 8px 0;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 4px;
+        }
+        
+        .message-content h2 {
+            font-size: 15px;
+            font-weight: 600;
+            margin: 10px 0 6px 0;
+        }
+        
+        .message-content h3 {
+            font-size: 14px;
+            font-weight: 600;
+            margin: 8px 0 4px 0;
+        }
+        
+        .message-content h4, 
+        .message-content h5, 
+        .message-content h6 {
+            font-size: 13px;
+            font-weight: 600;
+            margin: 6px 0 4px 0;
+        }
+        
+        .message-content p {
+            margin: 4px 0;
+        }
+        
+        .message-content code {
+            background: var(--thinking-bg);
+            padding: 2px 6px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            border-radius: 3px;
+        }
+        
+        .message-content pre {
+            background: var(--thinking-bg);
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            overflow-x: auto;
+            margin: 8px 0;
+            border-radius: 4px;
+        }
+        
+        .message-content pre code {
+            background: none;
+            padding: 0;
+            font-size: 12px;
+        }
+        
+        .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        
+        .message-content th,
+        .message-content td {
+            border: 1px solid var(--border-color);
+            padding: 6px 8px;
+            text-align: left;
+        }
+        
+        .message-content th {
+            background: var(--thinking-bg);
+            font-weight: 600;
+        }
+        
+        .message-content ul,
+        .message-content ol {
+            margin: 6px 0;
+            padding-left: 20px;
+        }
+        
+        .message-content li {
+            margin: 2px 0;
+        }
+        
+        .message-content blockquote {
+            border-left: 3px solid var(--border-color);
+            padding-left: 12px;
+            margin: 8px 0;
+            color: var(--text-secondary);
+        }
+        
+        .message-content a {
+            color: var(--accent);
+            text-decoration: underline;
+        }
+        
+        .message-content hr {
+            border: none;
+            border-top: 1px solid var(--border-color);
+            margin: 12px 0;
+        }
 
-        /* Thinking Box */
+        /* Thinking Section - Main collapsible container */
+        .thinking-section {
+            background: var(--thinking-bg);
+            border: 1px solid var(--border-color);
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+        
+        .thinking-section-header {
+            padding: 10px 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-primary);
+            user-select: none;
+        }
+        
+        .thinking-section-header:hover {
+            background: var(--hover-bg);
+        }
+        
+        .thinking-section-arrow {
+            font-size: 10px;
+            transition: transform 0.2s;
+        }
+        
+        .thinking-section-arrow.expanded {
+            transform: rotate(90deg);
+        }
+        
+        .thinking-section-content {
+            display: none;
+            border-top: 1px solid var(--border-color);
+        }
+        
+        .thinking-section-content.show {
+            display: block;
+        }
+
+        /* Individual Thinking Item */
+        .thinking-item {
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .thinking-item:last-child {
+            border-bottom: none;
+        }
+        
+        .thinking-item-header {
+            padding: 8px 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            background: var(--bg-secondary);
+        }
+        
+        .thinking-item-header:hover {
+            background: var(--hover-bg);
+        }
+        
+        .thinking-item-arrow {
+            font-size: 8px;
+            transition: transform 0.2s;
+        }
+        
+        .thinking-item-arrow.expanded {
+            transform: rotate(90deg);
+        }
+        
+        .thinking-item-content {
+            display: none;
+            padding: 10px 12px 10px 28px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            line-height: 1.4;
+        }
+        
+        .thinking-item-content.show {
+            display: block;
+        }
+
+        /* Tool Invocation Item */
+        .tool-invocation {
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .tool-invocation:last-child {
+            border-bottom: none;
+        }
+        
+        .tool-invocation-header {
+            padding: 8px 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            background: var(--bg-secondary);
+        }
+        
+        .tool-invocation-header:hover {
+            background: var(--hover-bg);
+        }
+        
+        .tool-invocation-arrow {
+            font-size: 8px;
+            transition: transform 0.2s;
+        }
+        
+        .tool-invocation-arrow.expanded {
+            transform: rotate(90deg);
+        }
+        
+        .tool-invocation-content {
+            display: none;
+            padding: 10px 12px 10px 28px;
+        }
+        
+        .tool-invocation-content.show {
+            display: block;
+        }
+        
+        .tool-message {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        
+        .tool-command {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            padding: 8px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+            margin: 6px 0;
+            border-radius: 3px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .tool-output {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            padding: 8px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 11px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin: 6px 0;
+            border-radius: 3px;
+            white-space: pre-wrap;
+        }
+        
+        .tool-status {
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+        }
+        
+        .tool-status.confirmed {
+            color: #22C55E;
+        }
+        
+        .tool-status.pending {
+            color: #F59E0B;
+        }
+
+        /* Old Thinking Box - Keep for compatibility but hidden by default */
         .thinking-box {
             background: var(--thinking-bg);
             border: 1px solid var(--border-color);
@@ -1497,23 +1776,83 @@ export function getWebViewHTML(): string {
                 if (m.model) html += '<span class="message-model">' + escapeHtml(m.model.replace('copilot/', '')) + '</span>';
                 html += '</div>';
                 
-                // Thinking boxes (can be multiple)
-                if (m.thinking && Array.isArray(m.thinking) && m.thinking.length > 0) {
-                    m.thinking.forEach((think, thinkIdx) => {
-                        if (think && think.content) {
-                            const thinkingId = 'thinking-' + i + '-' + thinkIdx;
-                            html += '<div class="thinking-box">';
-                            html += '<div class="thinking-header" onclick="toggleThinking(\\'' + thinkingId + '\\')">';
-                            html += '<span class="thinking-arrow" id="arrow-' + thinkingId + '">▶</span>';
-                            html += '<span>💭 ' + escapeHtml(think.title) + '</span>';
+                // Render thinking section with all thinking parts and tool invocations
+                if (m.thinking && (m.thinking.thinkingParts?.length > 0 || m.thinking.toolInvocations?.length > 0)) {
+                    const sectionId = 'thinking-section-' + i;
+                    const totalItems = (m.thinking.thinkingParts?.length || 0) + (m.thinking.toolInvocations?.length || 0);
+                    
+                    html += '<div class="thinking-section">';
+                    html += '<div class="thinking-section-header" onclick="toggleThinkingSection(\\'' + sectionId + '\\')">';
+                    html += '<span class="thinking-section-arrow" id="arrow-' + sectionId + '">▶</span>';
+                    html += '<span>🧠 Thinking (' + totalItems + ' item' + (totalItems !== 1 ? 's' : '') + ')</span>';
+                    html += '</div>';
+                    html += '<div class="thinking-section-content" id="' + sectionId + '">';
+                    
+                    // Render individual thinking parts
+                    if (m.thinking.thinkingParts && m.thinking.thinkingParts.length > 0) {
+                        m.thinking.thinkingParts.forEach((think, thinkIdx) => {
+                            if (think && think.value) {
+                                const thinkId = 'think-' + i + '-' + thinkIdx;
+                                const title = think.generatedTitle || 'Thinking step ' + (thinkIdx + 1);
+                                
+                                html += '<div class="thinking-item">';
+                                html += '<div class="thinking-item-header" onclick="toggleThinkingItem(\\'' + thinkId + '\\')">';
+                                html += '<span class="thinking-item-arrow" id="arrow-' + thinkId + '">▶</span>';
+                                html += '<span>💭 ' + escapeHtml(title) + '</span>';
+                                html += '</div>';
+                                html += '<div class="thinking-item-content" id="' + thinkId + '">';
+                                html += escapeHtml(think.value);
+                                html += '</div></div>';
+                            }
+                        });
+                    }
+                    
+                    // Render tool invocations
+                    if (m.thinking.toolInvocations && m.thinking.toolInvocations.length > 0) {
+                        m.thinking.toolInvocations.forEach((tool, toolIdx) => {
+                            const toolId = 'tool-' + i + '-' + toolIdx;
+                            const toolIcon = getToolIcon(tool.toolId);
+                            const toolName = tool.pastTenseMessage || tool.invocationMessage || tool.toolId;
+                            
+                            html += '<div class="tool-invocation">';
+                            html += '<div class="tool-invocation-header" onclick="toggleToolInvocation(\\'' + toolId + '\\')">';
+                            html += '<span class="tool-invocation-arrow" id="arrow-' + toolId + '">▶</span>';
+                            html += '<span>' + toolIcon + ' ' + escapeHtml(toolName) + '</span>';
                             html += '</div>';
-                            html += '<div class="thinking-content" id="' + thinkingId + '">' + escapeHtml(think.content) + '</div>';
-                            html += '</div>';
-                        }
-                    });
+                            html += '<div class="tool-invocation-content" id="' + toolId + '">';
+                            
+                            // Show command line for terminal invocations
+                            if (tool.kind === 'terminal' && tool.commandLine) {
+                                html += '<div class="tool-message">Command:</div>';
+                                html += '<div class="tool-command">' + escapeHtml(tool.commandLine) + '</div>';
+                                
+                                // Show output if available
+                                if (tool.output) {
+                                    html += '<div class="tool-message">Output:</div>';
+                                    html += '<div class="tool-output">' + escapeHtml(tool.output) + '</div>';
+                                }
+                            } else if (tool.invocationMessage) {
+                                html += '<div class="tool-message">' + escapeHtml(tool.invocationMessage) + '</div>';
+                            }
+                            
+                            // Show status
+                            const statusClass = tool.isConfirmed ? 'confirmed' : 'pending';
+                            const statusText = tool.isComplete ? 
+                                (tool.isConfirmed ? '✓ Completed' : '⏳ Pending') : 
+                                '⏳ In progress';
+                            html += '<div class="tool-status ' + statusClass + '">' + statusText + '</div>';
+                            
+                            html += '</div></div>';
+                        });
+                    }
+                    
+                    html += '</div></div>';
                 }
                 
-                html += '<div class="message-content">' + linkifyFiles(escapeHtml(m.text)) + '</div>';
+                // Render message content with markdown
+                if (m.text) {
+                    html += '<div class="message-content">' + renderMarkdown(linkifyFiles(m.text)) + '</div>';
+                }
                 
                 // Pending command
                 if (m.pendingCommand && m.pendingCommand.command) {
@@ -1537,6 +1876,59 @@ export function getWebViewHTML(): string {
             requestAnimationFrame(() => {
                 container.scrollTop = container.scrollHeight;
             });
+        }
+        
+        function renderMarkdown(text) {
+            if (!text) return '';
+            try {
+                // Use marked.js if available
+                if (typeof marked !== 'undefined') {
+                    return marked.parse(text);
+                }
+            } catch (e) {
+                console.error('Markdown parsing error:', e);
+            }
+            // Fallback to escaped HTML
+            return escapeHtml(text).replace(/\\n/g, '<br>');
+        }
+        
+        function getToolIcon(toolId) {
+            const icons = {
+                'run_in_terminal': '⌨️',
+                'create_file': '📄',
+                'replace_string_in_file': '✏️',
+                'read_file': '📖',
+                'list_dir': '📁',
+                'grep_search': '🔍',
+                'semantic_search': '🔎',
+                'file_search': '🔍',
+                'get_errors': '⚠️',
+                'run_task': '▶️',
+                'install_python_packages': '📦',
+                'run_notebook_cell': '📓'
+            };
+            return icons[toolId] || '🔧';
+        }
+        
+        function toggleThinkingSection(id) {
+            const content = document.getElementById(id);
+            const arrow = document.getElementById('arrow-' + id);
+            content.classList.toggle('show');
+            arrow.classList.toggle('expanded');
+        }
+        
+        function toggleThinkingItem(id) {
+            const content = document.getElementById(id);
+            const arrow = document.getElementById('arrow-' + id);
+            content.classList.toggle('show');
+            arrow.classList.toggle('expanded');
+        }
+        
+        function toggleToolInvocation(id) {
+            const content = document.getElementById(id);
+            const arrow = document.getElementById('arrow-' + id);
+            content.classList.toggle('show');
+            arrow.classList.toggle('expanded');
         }
 
         function toggleThinking(id) {
@@ -1720,12 +2112,17 @@ export function getWebViewHTML(): string {
             if (isInMessagesView && selectedSessionIndex >= 0 && currentInbox?.sessions?.[selectedSessionIndex]?.sessionId) {
                 sessionMode = 'session';
                 sessionId = currentInbox.sessions[selectedSessionIndex].sessionId;
+                console.log('Sending to session:', sessionId, 'at index:', selectedSessionIndex);
             } else if (sessionSelect === 'new') {
                 sessionMode = 'new';
+                console.log('Creating new session');
             } else if (sessionSelect.startsWith('session-')) {
                 sessionMode = 'session';
                 const idx = parseInt(sessionSelect.replace('session-', ''));
                 sessionId = currentInbox?.sessions?.[idx]?.sessionId;
+                console.log('Sending to selected session:', sessionId, 'at index:', idx);
+            } else {
+                console.log('Using current/default session mode');
             }
             sendBtn.disabled = true;
             sendBtn.textContent = '...';

@@ -1,9 +1,22 @@
 // Types for Remote Chat Control Extension
 
 export interface ThinkingPart {
-    title: string;
-    content: string;
     id?: string;
+    value: string;
+    generatedTitle?: string;
+}
+
+export interface ToolInvocation {
+    toolId: string;
+    toolCallId: string;
+    invocationMessage?: string;
+    pastTenseMessage?: string;
+    commandLine?: string;
+    isConfirmed?: boolean;
+    isComplete?: boolean;
+    language?: string;
+    output?: string;
+    kind?: 'terminal' | 'file' | 'edit' | 'other';
 }
 
 export interface PendingCommand {
@@ -12,10 +25,15 @@ export interface PendingCommand {
     toolCallId: string;
 }
 
+export interface ThinkingSection {
+    thinkingParts: ThinkingPart[];
+    toolInvocations: ToolInvocation[];
+}
+
 export interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
-    thinking?: ThinkingPart[];  // Changed to array to support multiple thinking items
+    thinking?: ThinkingSection;  // Grouped thinking with tool invocations
     model?: string;
     timestamp?: number;
     pendingCommand?: PendingCommand;
