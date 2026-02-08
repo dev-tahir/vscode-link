@@ -1405,39 +1405,64 @@ export function getWebViewHTML(): string {
 
         // WebSocket
         function connectWebSocket() {
-            // Derive WS port from HTTP port (WS port = HTTP port + 1)
+            // Determine WebSocket URL based on server type
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const httpPort = parseInt(window.location.port) || 3847;
-            const wsPort = document.getElementById('wsPort')?.value || (httpPort + 1);
-            try {
-                ws = new WebSocket('ws://' + window.location.hostname + ':' + wsPort);
-                
-                ws.onopen = () => {
-                    console.log('WebSocket connected on port ' + wsPort);
-                    updateStatus(true);
-                };
-                
-                ws.onclose = () => {
-                    console.log('WebSocket disconnected');
-                    updateStatus(false);
-                    setTimeout(connectWebSocket, 5000);
-                };
-                
-                ws.onmessage = (event) => {
-                    try {
-                        const msg = JSON.parse(event.data);
-                        handleWebSocketMessage(msg);
-                    } catch (e) {
-                        console.error('WS message error:', e);
+            const customWsPort = document.getElementById('wsPort')?.value;
+            
+            // Try same-port connection first (standalone/Cloud Run mode)
+            // Falls back to separate WS port (extension embedded mode)
+            const samePortUrl = wsProtocol + '//' + window.location.host + '/browser';
+            const separatePortUrl = 'ws://' + window.location.hostname + ':' + (customWsPort || (httpPort + 1));
+            
+            let wsUrl = samePortUrl;
+            let fallbackAttempted = false;
+            
+            function attemptConnect(url) {
+                try {
+                    ws = new WebSocket(url);
+                    
+                    ws.onopen = () => {
+                        console.log('WebSocket connected: ' + url);
+                        updateStatus(true);
+                    };
+                    
+                    ws.onclose = () => {
+                        console.log('WebSocket disconnected');
+                        updateStatus(false);
+                        setTimeout(connectWebSocket, 5000);
+                    };
+                    
+                    ws.onmessage = (event) => {
+                        try {
+                            const msg = JSON.parse(event.data);
+                            handleWebSocketMessage(msg);
+                        } catch (e) {
+                            console.error('WS message error:', e);
+                        }
+                    };
+                    
+                    ws.onerror = (error) => {
+                        console.error('WebSocket error on ' + url);
+                        // If same-port failed, try separate port (extension mode)
+                        if (!fallbackAttempted && url === samePortUrl) {
+                            fallbackAttempted = true;
+                            console.log('Trying fallback WS port...');
+                            attemptConnect(separatePortUrl);
+                        }
+                    };
+                } catch (e) {
+                    console.error('WebSocket connection failed:', e);
+                    if (!fallbackAttempted && url === samePortUrl) {
+                        fallbackAttempted = true;
+                        attemptConnect(separatePortUrl);
+                    } else {
+                        updateStatus(false);
                     }
-                };
-                
-                ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                };
-            } catch (e) {
-                console.error('WebSocket connection failed:', e);
-                updateStatus(false);
+                }
             }
+            
+            attemptConnect(wsUrl);
         }
 
         function handleWebSocketMessage(msg) {

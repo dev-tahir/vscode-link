@@ -10,6 +10,7 @@ import { getWebViewHTML } from './webview';
 import { WebSocketMessage, ChatHistoryEntry, CapturedMessage, StorageFile, VSCodeInstance } from './types';
 import * as instanceManager from './instanceManager';
 import { InstanceInfo, InstanceRole, LockFileData } from './instanceManager';
+import { CloudConnector } from './cloudConnector';
 
 let httpServer: http.Server | null = null;
 let wsServer: WebSocketServer | null = null;
@@ -29,6 +30,10 @@ let backupPollInterval: NodeJS.Timeout | null = null;
 let currentRole: InstanceRole = 'standalone';
 let currentHttpPort: number = 3847; // Track the port this instance is running on
 let currentWsPort: number = 3848;
+
+// Cloud connector for connecting TO remote servers
+let cloudConnector: CloudConnector | null = null;
+let isCloudConnected = false;
 
 // Export function to get current port (for extension.ts)
 export function getCurrentPort(): number {
@@ -1065,4 +1070,109 @@ export async function handleCommandAction(action: string): Promise<void> {
             }
         });
     });
+}
+
+// ============= Cloud Server Connection =============
+
+/**
+ * Connect to a remote cloud server (Cloud Run, etc.)
+ * Extension becomes a WebSocket client
+ */
+export async function connectToCloud(serverUrl: string): Promise<boolean> {
+    if (isCloudConnected && cloudConnector?.connected) {
+        log('Already connected to cloud server');
+        return true;
+    }
+    
+    log(`Connecting to cloud server: ${serverUrl}`);
+    
+    // Create cloud connector if not exists
+    if (!cloudConnector) {
+        cloudConnector = new CloudConnector(outputChannel);
+    }
+    
+    // Set workspace info
+    const workspaceName = vscode.workspace.name || 
+        vscode.workspace.workspaceFolders?.[0]?.name || 
+        'VS Code';
+    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    cloudConnector.setWorkspaceInfo(
+        currentWorkspaceHash || 'unknown',
+        workspaceName,
+        workspacePath
+    );
+    
+    // Set callbacks
+    cloudConnector.setCallbacks({
+        onInboxRequest: () => getCurrentInbox(),
+        onSendChat: sendToChat,
+        onCommandAction: handleCommandAction,
+        onSendAndWait: async (message: string, model?: string, sessionMode?: string, sessionId?: string, maxWait?: number) => {
+            const beforeSend = Date.now();
+            await sendToChat(message, model, sessionMode, sessionId);
+            
+            const effectiveWorkspace = currentWorkspaceHash || inbox.getCurrentWorkspaceHash();
+            if (!effectiveWorkspace) {
+                return { error: 'No workspace detected' };
+            }
+            
+            const result = await inbox.waitForNewReply(effectiveWorkspace, beforeSend, maxWait || 60000);
+            return result;
+        }
+    });
+    
+    // Connect
+    const success = await cloudConnector.connect(serverUrl);
+    isCloudConnected = success;
+    
+    if (success) {
+        log('Connected to cloud server successfully');
+        
+        // Set up periodic inbox sync
+        startCloudInboxSync();
+    } else {
+        log('Failed to connect to cloud server');
+    }
+    
+    return success;
+}
+
+/**
+ * Disconnect from cloud server
+ */
+export function disconnectFromCloud(): void {
+    if (cloudConnector) {
+        cloudConnector.disconnect();
+        cloudConnector = null;
+    }
+    isCloudConnected = false;
+    stopCloudInboxSync();
+    log('Disconnected from cloud server');
+}
+
+/**
+ * Check if connected to cloud
+ */
+export function isConnectedToCloud(): boolean {
+    return isCloudConnected && cloudConnector?.connected === true;
+}
+
+let cloudSyncInterval: NodeJS.Timeout | null = null;
+
+function startCloudInboxSync() {
+    stopCloudInboxSync();
+    
+    // Sync inbox to cloud every 2 seconds when changes detected
+    cloudSyncInterval = setInterval(() => {
+        if (cloudConnector?.connected) {
+            cloudConnector.sendInboxUpdate();
+        }
+    }, 2000);
+}
+
+function stopCloudInboxSync() {
+    if (cloudSyncInterval) {
+        clearInterval(cloudSyncInterval);
+        cloudSyncInterval = null;
+    }
 }

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Phone outline -->
+  <rect x="5" y="1" width="14" height="22" rx="2" ry="2"/>
+  <!-- Screen -->
+  <line x1="5" y1="4" x2="19" y2="4"/>
+  <line x1="5" y1="19" x2="19" y2="19"/>
+  <!-- Signal/broadcast waves -->
+  <path d="M9 9 L12 12 L15 9" />
+  <path d="M8 7.5 Q12 14 16 7.5" />
+  <!-- Code brackets on screen -->
+  <polyline points="9,14 7.5,15.5 9,17"/>
+  <polyline points="15,14 16.5,15.5 15,17"/>
+  <line x1="13" y1="13.5" x2="11" y2="17.5"/>
+  <!-- Home button -->
+  <circle cx="12" cy="21" r="0.5" fill="currentColor"/>
+</svg>

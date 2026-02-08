@@ -12,10 +12,29 @@
 		"Other"
 	],
 	"activationEvents": [
-		"onStartupFinished"
+		"onStartupFinished",
+		"onView:remoteChatControl.sidebar"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "remoteChatControl",
+					"title": "Remote Chat",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
+		"views": {
+			"remoteChatControl": [
+				{
+					"id": "remoteChatControl.sidebar",
+					"name": "Remote Chat Control",
+					"icon": "media/icon.svg"
+				}
+			]
+		},
 		"chatParticipants": [
 			{
 				"id": "remote-control.remote",
@@ -66,6 +85,19 @@
 			{
 				"command": "remoteChatControl.clearHistory",
 				"title": "Remote Chat: Clear History"
+			},
+			{
+				"command": "remoteChatControl.connectCloud",
+				"title": "Remote Chat: Connect to Cloud Server",
+				"icon": "$(cloud)"
+			},
+			{
+				"command": "remoteChatControl.disconnectCloud",
+				"title": "Remote Chat: Disconnect from Cloud Server"
+			},
+			{
+				"command": "remoteChatControl.showOutput",
+				"title": "Remote Chat: Show Output Log"
 			}
 		],
 		"configuration": {
@@ -83,8 +115,18 @@
 				},
 				"remoteChatControl.autoStart": {
 					"type": "boolean",
-					"default": true,
-					"description": "Auto-start server on extension activation"
+					"default": false,
+					"description": "Auto-start local server on extension activation"
+				},
+				"remoteChatControl.cloudServerUrl": {
+					"type": "string",
+					"default": "",
+					"description": "Cloud server URL (e.g., wss://your-app.run.app)"
+				},
+				"remoteChatControl.cloudAutoConnect": {
+					"type": "boolean",
+					"default": false,
+					"description": "Auto-connect to cloud server on startup"
 				}
 			}
 		}
