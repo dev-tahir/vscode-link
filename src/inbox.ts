@@ -403,12 +403,12 @@ export function getLatestReplyForWorkspace(workspaceHash: string): {
     };
 }
 
-// Wait for new messages in a workspace (poll-based)
+// Wait for new messages in a workspace using fs.watch for instant detection
 export async function waitForNewReply(
     workspaceHash: string, 
     afterTimestamp: number,
     maxWaitMs: number = 60000,
-    pollIntervalMs: number = 2000
+    pollIntervalMs: number = 500
 ): Promise<{
     success: boolean;
     userMessage?: string;
@@ -417,11 +417,16 @@ export async function waitForNewReply(
     error?: string;
 }> {
     const startTime = Date.now();
-    
-    while ((Date.now() - startTime) < maxWaitMs) {
-        const inbox = getInboxForWorkspace(workspaceHash);
+    const chatSessionsPath = path.join(
+        os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage',
+        workspaceHash, 'chatSessions'
+    );
+
+    // Helper to check for new reply in inbox
+    const checkForReply = (): { found: boolean; userMessage?: string; assistantReply?: string } => {
+        const inboxData = getInboxForWorkspace(workspaceHash);
         
-        for (const session of inbox.sessions) {
+        for (const session of inboxData.sessions) {
             if (session.lastMessageAt > afterTimestamp) {
                 for (let i = session.messages.length - 1; i >= 0; i--) {
                     const msg = session.messages[i];
@@ -433,24 +438,87 @@ export async function waitForNewReply(
                                 break;
                             }
                         }
-                        
-                        return {
-                            success: true,
-                            userMessage: userMsg,
-                            assistantReply: msg.text,
-                            waitedMs: Date.now() - startTime
-                        };
+                        return { found: true, userMessage: userMsg, assistantReply: msg.text };
                     }
                 }
             }
         }
-        
-        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-    }
-    
-    return {
-        success: false,
-        error: `Timeout after ${maxWaitMs}ms - no new reply found`,
-        waitedMs: maxWaitMs
+        return { found: false };
     };
+
+    // Immediate check first
+    const immediate = checkForReply();
+    if (immediate.found) {
+        return {
+            success: true,
+            userMessage: immediate.userMessage,
+            assistantReply: immediate.assistantReply,
+            waitedMs: Date.now() - startTime
+        };
+    }
+
+    // Use fs.watch for instant file change detection + fallback poll
+    return new Promise((resolve) => {
+        let watcher: fs.FSWatcher | null = null;
+        let fallbackInterval: NodeJS.Timeout | null = null;
+        let timeoutTimer: NodeJS.Timeout | null = null;
+        let resolved = false;
+        let checkDebounce: NodeJS.Timeout | null = null;
+
+        const cleanup = () => {
+            if (resolved) return;
+            resolved = true;
+            if (watcher) { try { watcher.close(); } catch {} watcher = null; }
+            if (fallbackInterval) { clearInterval(fallbackInterval); fallbackInterval = null; }
+            if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = null; }
+            if (checkDebounce) { clearTimeout(checkDebounce); checkDebounce = null; }
+        };
+
+        const doCheck = () => {
+            if (resolved) return;
+            try {
+                const result = checkForReply();
+                if (result.found) {
+                    cleanup();
+                    resolve({
+                        success: true,
+                        userMessage: result.userMessage,
+                        assistantReply: result.assistantReply,
+                        waitedMs: Date.now() - startTime
+                    });
+                }
+            } catch {}
+        };
+
+        // Debounced check - coalesces rapid file changes into one check
+        const debouncedCheck = () => {
+            if (checkDebounce) clearTimeout(checkDebounce);
+            checkDebounce = setTimeout(doCheck, 80);
+        };
+
+        // Start watching the chatSessions folder for changes
+        if (fs.existsSync(chatSessionsPath)) {
+            try {
+                watcher = fs.watch(chatSessionsPath, { persistent: false, recursive: true }, (eventType, filename) => {
+                    if (filename && (filename.endsWith('.json') || filename.endsWith('.jsonl'))) {
+                        debouncedCheck();
+                    }
+                });
+                watcher.on('error', () => {}); // Ignore watcher errors
+            } catch {}
+        }
+
+        // Fallback poll in case fs.watch misses events (reduced to 500ms)
+        fallbackInterval = setInterval(doCheck, pollIntervalMs);
+
+        // Timeout
+        timeoutTimer = setTimeout(() => {
+            cleanup();
+            resolve({
+                success: false,
+                error: `Timeout after ${maxWaitMs}ms - no new reply found`,
+                waitedMs: maxWaitMs
+            });
+        }, maxWaitMs);
+    });
 }

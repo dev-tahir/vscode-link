@@ -121,7 +121,7 @@ function startBackupPoll() {
         } catch (e) {
             // Ignore errors in backup poll
         }
-    }, 2000); // Check every 2 seconds
+    }, 1000); // Check every second
 }
 
 function log(msg: string) {
@@ -149,17 +149,21 @@ function startFileWatcher() {
     try {
         fileWatcher = fs.watch(chatSessionsPath, { persistent: false, recursive: true }, (eventType, filename) => {
             if (filename && (filename.endsWith('.json') || filename.endsWith('.jsonl'))) {
-                // Debounce - don't broadcast more than once per second
+                // Debounce - don't broadcast more than once per 200ms
                 const now = Date.now();
-                if (now - lastBroadcastTime < 1000) return;
+                if (now - lastBroadcastTime < 200) return;
                 lastBroadcastTime = now;
                 
                 log(`File changed: ${filename}, broadcasting update...`);
                 
-                // Broadcast inbox update to all connected clients
+                // Broadcast inbox update quickly
                 setTimeout(() => {
                     broadcastInboxUpdate();
-                }, 500); // Small delay to ensure file is fully written
+                    // Also push to cloud immediately on file change
+                    if (cloudConnector?.connected) {
+                        cloudConnector.sendInboxUpdate();
+                    }
+                }, 100); // Minimal delay to ensure file is fully written
             }
         });
         
@@ -802,6 +806,365 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         return;
     }
 
+    // ========== TERMINAL API ==========
+
+    // List all terminals
+    if (pathname === '/api/terminals') {
+        const terminals = vscode.window.terminals.map((t, i) => ({
+            id: i,
+            name: t.name,
+            processId: null // processId is async, skip for list
+        }));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ terminals }));
+        return;
+    }
+
+    // Get terminal output (using shell integration)
+    if (pathname.match(/^\/api\/terminals\/(\d+)\/output$/)) {
+        const termIdx = parseInt(pathname.split('/')[3]);
+        const terminals = vscode.window.terminals;
+        if (termIdx >= 0 && termIdx < terminals.length) {
+            const terminal = terminals[termIdx];
+            // Try to get output via shell integration
+            let output = '';
+            let cwd = '';
+            try {
+                const shellIntegration = (terminal as any).shellIntegration;
+                if (shellIntegration) {
+                    cwd = shellIntegration.cwd?.fsPath || '';
+                    // Get recent executions
+                    const executions = shellIntegration.executions || [];
+                    const recentExecutions = Array.from(executions).slice(-20);
+                    output = recentExecutions.map((exec: any) => {
+                        let text = '';
+                        if (exec.commandLine?.value) text += '> ' + exec.commandLine.value + '\n';
+                        if (exec.output) {
+                            try {
+                                for (const chunk of exec.output) {
+                                    text += chunk;
+                                }
+                            } catch (e) {
+                                // output may not be iterable
+                            }
+                        }
+                        return text;
+                    }).join('\n');
+                }
+            } catch (e) {
+                log(`Shell integration not available for terminal ${termIdx}: ${e}`);
+            }
+            
+            if (!cwd) {
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+                cwd = workspacePath;
+            }
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, output, cwd, name: terminal.name }));
+        } else {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Terminal not found' }));
+        }
+        return;
+    }
+
+    // Execute command in terminal
+    if (pathname === '/api/terminals/execute' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = JSON.parse(body);
+        const command = data.command;
+        const terminalId = data.terminalId;
+        
+        if (!command) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'No command provided' }));
+            return;
+        }
+        
+        const terminals = vscode.window.terminals;
+        let terminal: vscode.Terminal;
+        
+        if (terminalId !== undefined && terminalId >= 0 && terminalId < terminals.length) {
+            terminal = terminals[terminalId];
+        } else if (terminals.length > 0) {
+            terminal = terminals[0];
+        } else {
+            terminal = vscode.window.createTerminal('Remote');
+        }
+        
+        terminal.show(false);
+        terminal.sendText(command);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, terminalName: terminal.name }));
+        return;
+    }
+
+    // Create new terminal
+    if (pathname === '/api/terminals/create' && req.method === 'POST') {
+        const terminal = vscode.window.createTerminal('Remote Terminal');
+        terminal.show(false);
+        const idx = vscode.window.terminals.indexOf(terminal);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, id: idx, name: terminal.name }));
+        return;
+    }
+
+    // ========== FILES API ==========
+
+    // File tree listing
+    if (pathname === '/api/files/tree' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = JSON.parse(body || '{}');
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const targetPath = data.path || workspacePath;
+        
+        if (!targetPath) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'No workspace open' }));
+            return;
+        }
+        
+        try {
+            const items: any[] = [];
+            const entries = await fs.promises.readdir(targetPath, { withFileTypes: true });
+            
+            for (const entry of entries) {
+                // Skip common hidden/large dirs
+                if (entry.name.startsWith('.') && entry.name !== '.gitignore' && entry.name !== '.env') continue;
+                if (['node_modules', '__pycache__', '.git', 'dist', 'out', '.next', 'coverage'].includes(entry.name)) continue;
+                
+                const fullPath = path.join(targetPath, entry.name);
+                let size = 0;
+                try {
+                    if (!entry.isDirectory()) {
+                        const stat = await fs.promises.stat(fullPath);
+                        size = stat.size;
+                    }
+                } catch {}
+                
+                items.push({
+                    name: entry.name,
+                    path: fullPath,
+                    isDirectory: entry.isDirectory(),
+                    size: entry.isDirectory() ? undefined : size,
+                    depth: 0
+                });
+            }
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, items, root: workspacePath }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+    }
+
+    // ========== GIT API ==========
+
+    // Git status
+    if (pathname === '/api/git/status') {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        if (!workspacePath) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'No workspace open' }));
+            return;
+        }
+        
+        try {
+            const { execSync } = require('child_process');
+            const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+            
+            // Git status --porcelain
+            const statusOut = execSync('git status --porcelain', { cwd: workspacePath, encoding: 'utf-8' });
+            const lines = statusOut.split('\n').filter((l: string) => l.trim());
+            
+            const staged: any[] = [];
+            const changed: any[] = [];
+            const untracked: any[] = [];
+            
+            lines.forEach((line: string) => {
+                const x = line[0]; // staging area status
+                const y = line[1]; // working tree status
+                const filePath = line.substring(3).trim();
+                const fileName = filePath.split('/').pop() || filePath;
+                
+                // Staged changes (index)
+                if (x !== ' ' && x !== '?') {
+                    staged.push({ name: fileName, path: filePath, status: x });
+                }
+                // Working tree changes
+                if (y !== ' ' && y !== '?') {
+                    changed.push({ name: fileName, path: filePath, status: y === 'M' ? 'M' : y === 'D' ? 'D' : y });
+                }
+                // Untracked
+                if (x === '?' && y === '?') {
+                    untracked.push({ name: fileName, path: filePath, status: 'U' });
+                }
+            });
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, branch, staged, changed, untracked }));
+        } catch (e: any) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message.includes('not a git repository') ? 'Not a git repository' : e.message }));
+        }
+        return;
+    }
+
+    // Git diff
+    if (pathname === '/api/git/diff' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = JSON.parse(body);
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        
+        try {
+            const { execSync } = require('child_process');
+            let diff = '';
+            try {
+                // Try staged diff first, then unstaged
+                diff = execSync(`git diff -- "${data.file}"`, { cwd: workspacePath, encoding: 'utf-8' });
+                if (!diff) {
+                    diff = execSync(`git diff --cached -- "${data.file}"`, { cwd: workspacePath, encoding: 'utf-8' });
+                }
+                if (!diff) {
+                    // Maybe new/untracked file - show content
+                    const content = fs.readFileSync(path.join(workspacePath, data.file), 'utf-8');
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, content }));
+                    return;
+                }
+            } catch {
+                diff = '';
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, diff }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+    }
+
+    // Git stage file
+    if (pathname === '/api/git/stage' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = JSON.parse(body);
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        try {
+            const { execSync } = require('child_process');
+            execSync(`git add "${data.file}"`, { cwd: workspacePath });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // Git unstage file
+    if (pathname === '/api/git/unstage' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = JSON.parse(body);
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        try {
+            const { execSync } = require('child_process');
+            execSync(`git reset HEAD "${data.file}"`, { cwd: workspacePath });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // Git stage all
+    if (pathname === '/api/git/stage-all' && req.method === 'POST') {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        try {
+            const { execSync } = require('child_process');
+            execSync('git add -A', { cwd: workspacePath });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // Git unstage all
+    if (pathname === '/api/git/unstage-all' && req.method === 'POST') {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        try {
+            const { execSync } = require('child_process');
+            execSync('git reset HEAD', { cwd: workspacePath });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // Git commit
+    if (pathname === '/api/git/commit' && req.method === 'POST') {
+        const body = await readBody(req);
+        const data = JSON.parse(body);
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        if (!data.message) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: 'No commit message' }));
+            return;
+        }
+        try {
+            const { execSync } = require('child_process');
+            const escapedMsg = data.message.replace(/"/g, '\\"');
+            const result = execSync(`git commit -m "${escapedMsg}"`, { cwd: workspacePath, encoding: 'utf-8' });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, output: result }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // Git pull
+    if (pathname === '/api/git/pull' && req.method === 'POST') {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        try {
+            const { execSync } = require('child_process');
+            const result = execSync('git pull', { cwd: workspacePath, encoding: 'utf-8', timeout: 30000 });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, output: result }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
+    // Git push
+    if (pathname === '/api/git/push' && req.method === 'POST') {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        try {
+            const { execSync } = require('child_process');
+            const result = execSync('git push', { cwd: workspacePath, encoding: 'utf-8', timeout: 30000 });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, output: result }));
+        } catch (e: any) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: e.message }));
+        }
+        return;
+    }
+
     res.writeHead(404);
     res.end('Not found');
 }
@@ -1075,6 +1438,250 @@ export async function handleCommandAction(action: string): Promise<void> {
 // ============= Cloud Server Connection =============
 
 /**
+ * Register command handlers for terminal, files, and git proxy commands
+ */
+function registerProxyCommandHandlers(connector: CloudConnector) {
+    // ========== TERMINAL COMMANDS ==========
+
+    connector.registerCommandHandler('get_terminals', async () => {
+        const terminals = vscode.window.terminals.map((t, i) => ({
+            id: i,
+            name: t.name,
+            processId: null
+        }));
+        return { terminals };
+    });
+
+    connector.registerCommandHandler('get_terminal_output', async (data: any) => {
+        const termIdx = data?.terminalId ?? 0;
+        const terminals = vscode.window.terminals;
+        if (termIdx < 0 || termIdx >= terminals.length) {
+            return { error: 'Terminal not found' };
+        }
+        const terminal = terminals[termIdx];
+        let output = '';
+        let cwd = '';
+        try {
+            const shellIntegration = (terminal as any).shellIntegration;
+            if (shellIntegration) {
+                cwd = shellIntegration.cwd?.fsPath || '';
+                const executions = shellIntegration.executions || [];
+                const recentExecutions = Array.from(executions).slice(-20);
+                output = recentExecutions.map((exec: any) => {
+                    let text = '';
+                    if (exec.commandLine?.value) { text += '> ' + exec.commandLine.value + '\n'; }
+                    if (exec.output) {
+                        try { for (const chunk of exec.output) { text += chunk; } } catch {}
+                    }
+                    return text;
+                }).join('\n');
+            }
+        } catch (e) {
+            log(`Shell integration not available for terminal ${termIdx}: ${e}`);
+        }
+        if (!cwd) {
+            cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        }
+        return { success: true, output, cwd, name: terminal.name };
+    });
+
+    connector.registerCommandHandler('execute_terminal', async (data: any) => {
+        const command = data?.command;
+        const terminalId = data?.terminalId;
+        if (!command) { return { error: 'No command provided' }; }
+        const terminals = vscode.window.terminals;
+        let terminal: vscode.Terminal;
+        if (terminalId !== undefined && terminalId >= 0 && terminalId < terminals.length) {
+            terminal = terminals[terminalId];
+        } else if (terminals.length > 0) {
+            terminal = terminals[0];
+        } else {
+            terminal = vscode.window.createTerminal('Remote');
+        }
+        terminal.show(false);
+        terminal.sendText(command);
+        return { success: true, terminalName: terminal.name };
+    });
+
+    connector.registerCommandHandler('create_terminal', async () => {
+        const terminal = vscode.window.createTerminal('Remote Terminal');
+        terminal.show(false);
+        const idx = vscode.window.terminals.indexOf(terminal);
+        return { success: true, id: idx, name: terminal.name };
+    });
+
+    // ========== FILES COMMANDS ==========
+
+    connector.registerCommandHandler('get_file_tree', async (data: any) => {
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const targetPath = data?.path || workspacePath;
+        if (!targetPath) { return { error: 'No workspace open' }; }
+        try {
+            const items: any[] = [];
+            const entries = await fs.promises.readdir(targetPath, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.name.startsWith('.') && entry.name !== '.gitignore' && entry.name !== '.env') { continue; }
+                if (['node_modules', '__pycache__', '.git', 'dist', 'out', '.next', 'coverage'].includes(entry.name)) { continue; }
+                const fullPath = path.join(targetPath, entry.name);
+                let size = 0;
+                try {
+                    if (!entry.isDirectory()) {
+                        const stat = await fs.promises.stat(fullPath);
+                        size = stat.size;
+                    }
+                } catch {}
+                items.push({
+                    name: entry.name,
+                    path: fullPath,
+                    isDirectory: entry.isDirectory(),
+                    size: entry.isDirectory() ? undefined : size,
+                    depth: 0
+                });
+            }
+            return { success: true, items, root: workspacePath };
+        } catch (e: any) {
+            return { error: e.message };
+        }
+    });
+
+    connector.registerCommandHandler('read_file', async (data: any) => {
+        let filename = data?.filename || '';
+        if (!filename) { return { error: 'No filename provided' }; }
+        filename = filename.split('/').join('\\');
+        let fileUri: vscode.Uri | null = null;
+        if (filename.match(/^[a-zA-Z]:\\/)) {
+            fileUri = vscode.Uri.file(filename);
+        } else if (vscode.workspace.workspaceFolders?.length) {
+            fileUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filename);
+        }
+        if (!fileUri) { return { error: 'Could not locate file' }; }
+        try {
+            const fileData = await vscode.workspace.fs.readFile(fileUri);
+            const content = Buffer.from(fileData).toString('utf-8');
+            return { success: true, content, path: fileUri.fsPath };
+        } catch {
+            return { error: 'File not found' };
+        }
+    });
+
+    // ========== GIT COMMANDS ==========
+
+    const getWorkspacePath = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    connector.registerCommandHandler('get_git_status', async () => {
+        const workspacePath = getWorkspacePath();
+        if (!workspacePath) { return { success: false, error: 'No workspace open' }; }
+        try {
+            const { execSync } = require('child_process');
+            const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+            const statusOut = execSync('git status --porcelain', { cwd: workspacePath, encoding: 'utf-8' });
+            const lines = statusOut.split('\n').filter((l: string) => l.trim());
+            const staged: any[] = [];
+            const changed: any[] = [];
+            const untracked: any[] = [];
+            lines.forEach((line: string) => {
+                const x = line[0];
+                const y = line[1];
+                const filePath = line.substring(3).trim();
+                const fileName = filePath.split('/').pop() || filePath;
+                if (x !== ' ' && x !== '?') { staged.push({ name: fileName, path: filePath, status: x }); }
+                if (y !== ' ' && y !== '?') { changed.push({ name: fileName, path: filePath, status: y === 'M' ? 'M' : y === 'D' ? 'D' : y }); }
+                if (x === '?' && y === '?') { untracked.push({ name: fileName, path: filePath, status: 'U' }); }
+            });
+            return { success: true, branch, staged, changed, untracked };
+        } catch (e: any) {
+            return { success: false, error: e.message.includes('not a git repository') ? 'Not a git repository' : e.message };
+        }
+    });
+
+    connector.registerCommandHandler('get_git_diff', async (data: any) => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            let diff = '';
+            try {
+                diff = execSync(`git diff -- "${data.file}"`, { cwd: workspacePath, encoding: 'utf-8' });
+                if (!diff) { diff = execSync(`git diff --cached -- "${data.file}"`, { cwd: workspacePath, encoding: 'utf-8' }); }
+                if (!diff) {
+                    const content = fs.readFileSync(path.join(workspacePath, data.file), 'utf-8');
+                    return { success: true, content };
+                }
+            } catch { diff = ''; }
+            return { success: true, diff };
+        } catch (e: any) {
+            return { error: e.message };
+        }
+    });
+
+    connector.registerCommandHandler('git_stage', async (data: any) => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            execSync(`git add "${data.file}"`, { cwd: workspacePath });
+            return { success: true };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_unstage', async (data: any) => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            execSync(`git reset HEAD "${data.file}"`, { cwd: workspacePath });
+            return { success: true };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_stage_all', async () => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            execSync('git add -A', { cwd: workspacePath });
+            return { success: true };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_unstage_all', async () => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            execSync('git reset HEAD', { cwd: workspacePath });
+            return { success: true };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_commit', async (data: any) => {
+        const workspacePath = getWorkspacePath();
+        if (!data?.message) { return { success: false, error: 'No commit message' }; }
+        try {
+            const { execSync } = require('child_process');
+            const escapedMsg = data.message.replace(/"/g, '\\"');
+            const result = execSync(`git commit -m "${escapedMsg}"`, { cwd: workspacePath, encoding: 'utf-8' });
+            return { success: true, output: result };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_pull', async () => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            const result = execSync('git pull', { cwd: workspacePath, encoding: 'utf-8', timeout: 30000 });
+            return { success: true, output: result };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_push', async () => {
+        const workspacePath = getWorkspacePath();
+        try {
+            const { execSync } = require('child_process');
+            const result = execSync('git push', { cwd: workspacePath, encoding: 'utf-8', timeout: 30000 });
+            return { success: true, output: result };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    log('Registered terminal/files/git proxy command handlers');
+}
+
+/**
  * Connect to a remote cloud server (Cloud Run, etc.)
  * Extension becomes a WebSocket client
  */
@@ -1121,6 +1728,9 @@ export async function connectToCloud(serverUrl: string): Promise<boolean> {
         }
     });
     
+    // Register terminal/files/git command handlers for proxy
+    registerProxyCommandHandlers(cloudConnector);
+
     // Connect
     const success = await cloudConnector.connect(serverUrl);
     isCloudConnected = success;
@@ -1162,12 +1772,12 @@ let cloudSyncInterval: NodeJS.Timeout | null = null;
 function startCloudInboxSync() {
     stopCloudInboxSync();
     
-    // Sync inbox to cloud every 2 seconds when changes detected
+    // Sync inbox to cloud every second when changes detected
     cloudSyncInterval = setInterval(() => {
         if (cloudConnector?.connected) {
             cloudConnector.sendInboxUpdate();
         }
-    }, 2000);
+    }, 1000);
 }
 
 function stopCloudInboxSync() {
