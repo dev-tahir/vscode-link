@@ -1,9 +1,9 @@
 // WebSocket server setup, connection handling, and broadcast functions
 import WebSocket, { WebSocketServer } from 'ws';
-import * as inbox from './inbox';
-import * as instanceManager from './instanceManager';
-import { InstanceInfo } from './instanceManager';
-import { WebSocketMessage, VSCodeInstance } from './types';
+import * as inbox from '../inbox';
+import * as instanceManager from '../instanceManager';
+import { InstanceInfo } from '../instanceManager';
+import { WebSocketMessage, VSCodeInstance } from '../types';
 import { state, log } from './serverState';
 
 /** Start the WebSocket server on the given port */

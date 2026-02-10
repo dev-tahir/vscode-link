@@ -3,8 +3,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import * as inbox from './inbox';
-import { ChatHistoryEntry, VSCodeInstance, StorageFile } from './types';
+import * as inbox from '../inbox';
+import { ChatHistoryEntry, VSCodeInstance, StorageFile } from '../types';
 import { state, log } from './serverState';
 import { broadcastToClients } from './wsHandler';
 

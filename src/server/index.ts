@@ -2,13 +2,12 @@
 // This module ties together all server sub-modules and exposes the public API.
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as instanceManager from './instanceManager';
-import { InstanceRole } from './instanceManager';
+import * as instanceManager from '../instanceManager';
+import { InstanceRole } from '../instanceManager';
 import { state, log } from './serverState';
 import { startFileWatcher, stopFileWatcher, startBackupPoll, stopBackupPoll } from './fileWatcher';
 import { startWebSocketServerAsync, broadcastToClients, broadcastInstancesToClients } from './wsHandler';
 import { startHTTPServerAsync } from './httpRouter';
-import { disconnectFromCloud } from './cloudService';
 
 // ========== Re-exports (public API consumed by extension.ts and instanceManager.ts) ==========
 export { broadcastToClients } from './wsHandler';

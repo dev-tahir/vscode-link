@@ -2,7 +2,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import * as inbox from './inbox';
+import * as inbox from '../inbox';
 import { state, log } from './serverState';
 import { broadcastToClients } from './wsHandler';
 

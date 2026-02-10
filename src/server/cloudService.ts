@@ -2,8 +2,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as inbox from './inbox';
-import { CloudConnector } from './cloudConnector';
+import * as inbox from '../inbox';
+import { CloudConnector } from '../cloudConnector';
 import { state, log } from './serverState';
 import { sendToChat, handleCommandAction, getCurrentInbox } from './chatService';
 

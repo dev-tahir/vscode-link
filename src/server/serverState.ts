@@ -2,9 +2,9 @@
 import * as http from 'http';
 import * as vscode from 'vscode';
 import WebSocket, { WebSocketServer } from 'ws';
-import { ChatHistoryEntry, CapturedMessage, StorageFile } from './types';
-import { InstanceRole } from './instanceManager';
-import { CloudConnector } from './cloudConnector';
+import { ChatHistoryEntry, CapturedMessage, StorageFile } from '../types';
+import { InstanceRole } from '../instanceManager';
+import { CloudConnector } from '../cloudConnector';
 
 /**
  * Centralized server state object.

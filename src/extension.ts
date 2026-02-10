@@ -1,6 +1,6 @@
 // Remote Chat Control Extension - Main Entry Point
 import * as vscode from 'vscode';
-import * as server from './server';
+import * as server from './server/index';
 import { SidebarProvider } from './sidebar';
 
 let outputChannel: vscode.OutputChannel;

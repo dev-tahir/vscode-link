@@ -332,7 +332,7 @@ async function handleRemoteCommand(msg: any) {
     switch (msg.command) {
         case 'send_chat':
             // Import dynamically to avoid circular dependency
-            const server = await import('./server');
+            const server = await import('./server/index');
             await server.sendToChat(msg.message, msg.model, msg.sessionMode, msg.sessionId);
             break;
     }
