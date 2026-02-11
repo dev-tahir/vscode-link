@@ -6,12 +6,17 @@ import * as inbox from '../inbox';
 import { CloudConnector } from '../cloudConnector';
 import { state, log } from './serverState';
 import { sendToChat, handleCommandAction, getCurrentInbox } from './chatService';
+import { startFileWatcher, stopFileWatcher } from './fileWatcher';
 
 /**
  * Connect to a remote cloud server (Cloud Run, etc.)
  * Extension becomes a WebSocket client
  */
 export async function connectToCloud(serverUrl: string): Promise<boolean> {
+    // Ensure server is initialized before connecting
+    const { ensureInitialized } = require('./index');
+    ensureInitialized();
+
     if (state.isCloudConnected && state.cloudConnector?.connected) {
         log('Already connected to cloud server');
         return true;
@@ -63,7 +68,14 @@ export async function connectToCloud(serverUrl: string): Promise<boolean> {
 
     if (success) {
         log('Connected to cloud server successfully');
-        startCloudInboxSync();
+        
+        // Start file watcher to detect chat session changes
+        startFileWatcher();
+        
+        // Initial inbox sync - file watcher will handle subsequent updates
+        if (state.cloudConnector?.connected) {
+            state.cloudConnector.sendInboxUpdate();
+        }
     } else {
         log('Failed to connect to cloud server');
     }
@@ -78,7 +90,10 @@ export function disconnectFromCloud(): void {
         state.cloudConnector = null;
     }
     state.isCloudConnected = false;
-    stopCloudInboxSync();
+    
+    // Stop file watcher when disconnecting
+    stopFileWatcher();
+    
     log('Disconnected from cloud server');
 }
 

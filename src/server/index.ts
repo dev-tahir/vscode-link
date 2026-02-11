@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as instanceManager from '../instanceManager';
 import { InstanceRole } from '../instanceManager';
 import { state, log } from './serverState';
-import { startFileWatcher, stopFileWatcher, startBackupPoll, stopBackupPoll } from './fileWatcher';
+import { startFileWatcher, stopFileWatcher } from './fileWatcher';
 import { startWebSocketServerAsync, broadcastToClients, broadcastInstancesToClients } from './wsHandler';
 import { startHTTPServerAsync } from './httpRouter';
 
@@ -13,6 +13,10 @@ import { startHTTPServerAsync } from './httpRouter';
 export { broadcastToClients } from './wsHandler';
 export { sendToChat, getChatHistory, getCurrentInbox, handleCommandAction } from './chatService';
 export { connectToCloud, disconnectFromCloud, isConnectedToCloud } from './cloudService';
+
+// Store extension context for lazy initialization
+let extensionContext: vscode.ExtensionContext | null = null;
+let isInitialized = false;
 
 /** Get the HTTP port this instance is running on */
 export function getCurrentPort(): number {
@@ -24,13 +28,22 @@ export function getWorkspaceHash() {
     return state.currentWorkspaceHash;
 }
 
-/** Initialize the server module (call once on activation) */
-export function initServer(context: vscode.ExtensionContext, channel: vscode.OutputChannel) {
+/** Store extension context and output channel (call once on activation) */
+export function setExtensionContext(context: vscode.ExtensionContext, channel: vscode.OutputChannel) {
+    extensionContext = context;
     state.outputChannel = channel;
+}
+
+/** Initialize the server module (called lazily when needed) */
+export function ensureInitialized() {
+    if (isInitialized || !extensionContext) return;
+    isInitialized = true;
+
+    const context = extensionContext;
     state.extensionStoragePath = context.storageUri?.fsPath || context.globalStorageUri?.fsPath || '';
 
     // Initialize instance manager
-    instanceManager.initInstanceManager(channel);
+    instanceManager.initInstanceManager(state.outputChannel!);
 
     // Extract workspace hash from storage path
     const storagePathParts = state.extensionStoragePath.split(path.sep);
@@ -46,11 +59,7 @@ export function initServer(context: vscode.ExtensionContext, channel: vscode.Out
         const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         instanceManager.setLocalInstance(state.currentWorkspaceHash, workspaceName, workspacePath);
 
-        // Start watching chatSessions folder
-        startFileWatcher();
-
-        // Start backup polling (in case file watcher misses changes)
-        startBackupPoll();
+        // File watcher will start when connecting to cloud server
     }
 
     // Set up role change handler
@@ -119,8 +128,7 @@ export function stopServer() {
     // Clean up instance manager
     instanceManager.cleanup();
 
-    // Stop watchers and polling
-    stopBackupPoll();
+    // Stop file watcher
     stopFileWatcher();
 
     // Stop HTTP server

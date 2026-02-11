@@ -14,11 +14,10 @@ function log(msg: string) {
 
 export function activate(context: vscode.ExtensionContext) {
     outputChannel = vscode.window.createOutputChannel('Remote Chat Control');
-    outputChannel.show();
-    log('Extension activating...');
+    // Don't auto-show output panel - user can open via command
 
-    // Initialize server module
-    server.initServer(context, outputChannel);
+    // Store context for lazy initialization (will initialize when connecting)
+    server.setExtensionContext(context, outputChannel);
 
     // Register sidebar
     sidebarProvider = new SidebarProvider();
@@ -74,38 +73,23 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // Log workspace info
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (workspaceFolders) {
-        workspaceFolders.forEach(folder => {
-            log(`Workspace: ${folder.name} at ${folder.uri.fsPath}`);
-        });
-    }
-
     // Auto-connect to server if configured
     const config = vscode.workspace.getConfiguration('remoteChatControl');
     const serverUrl = config.get<string>('serverUrl');
     const autoConnect = config.get<boolean>('autoConnect');
     
     if (serverUrl && autoConnect) {
-        log(`Auto-connecting to server: ${serverUrl}`);
         server.connectToCloud(serverUrl).then(success => {
             if (success) {
-                log('Auto-connected to server');
                 sidebarProvider.cloudConnected = true;
                 sidebarProvider.cloudUrl = serverUrl;
-            } else {
-                log('Failed to auto-connect to server');
             }
         });
     }
-
-    log('Extension activated');
 }
 
 export function deactivate() {
     if (server.isConnectedToCloud()) {
         server.disconnectFromCloud();
     }
-    log('Extension deactivated');
 }
