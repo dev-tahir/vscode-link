@@ -235,13 +235,98 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
 
     const getWorkspacePath = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
-    connector.registerCommandHandler('get_git_status', async () => {
+    // Detect all git repositories in workspace
+    connector.registerCommandHandler('get_git_repos', async () => {
+        const workspacePath = getWorkspacePath();
+        if (!workspacePath) { return { success: false, error: 'No workspace open', repos: [] }; }
+        
+        const repos: any[] = [];
+        
+        // Helper to check if a directory is the ROOT of a git repo (has .git folder directly)
+        const isGitRepoRoot = (dir: string): boolean => {
+            try {
+                const gitDir = path.join(dir, '.git');
+                const stat = fs.statSync(gitDir);
+                return stat.isDirectory() || stat.isFile(); // .git can be a file in worktrees
+            } catch {
+                return false;
+            }
+        };
+        
+        // Helper to get display name from path
+        const getDisplayName = (repoPath: string): string => {
+            if (repoPath === workspacePath) {
+                // For root, use the workspace folder name
+                return path.basename(workspacePath);
+            }
+            // For subdirectories, use the folder name
+            return path.basename(repoPath);
+        };
+        
+        // Helper to get repo name from path (for URL routing)
+        const getRepoName = (repoPath: string): string => {
+            if (repoPath === workspacePath) return 'root';
+            const relative = path.relative(workspacePath, repoPath);
+            return relative.replace(/\\\\/g, '/');
+        };
+        
+        // Check workspace root
+        if (isGitRepoRoot(workspacePath)) {
+            repos.push({ 
+                path: workspacePath, 
+                name: 'root', 
+                displayName: getDisplayName(workspacePath)
+            });
+        }
+        
+        // Recursively search for git repos in subdirectories
+        // But SKIP searching inside directories that are already git repos
+        const searchForGitRepos = async (dir: string, depth: number = 0) => {
+            if (depth > 3) return; // Limit depth to avoid performance issues
+            
+            try {
+                const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+                
+                for (const entry of entries) {
+                    if (!entry.isDirectory()) continue;
+                    if (entry.name.startsWith('.')) continue; // Skip all hidden directories including .git
+                    if (['node_modules', '__pycache__', 'dist', 'out', '.next', 'coverage', 'build'].includes(entry.name)) continue;
+                    
+                    const fullPath = path.join(dir, entry.name);
+                    
+                    // Check if this directory is the ROOT of a git repo (has .git directly inside)
+                    if (isGitRepoRoot(fullPath)) {
+                        const repoName = getRepoName(fullPath);
+                        repos.push({ 
+                            path: fullPath, 
+                            name: repoName,
+                            displayName: getDisplayName(fullPath)
+                        });
+                        // DON'T search subdirectories of this git repo
+                        // This prevents finding nested repos inside repos
+                    } else {
+                        // Only continue searching if this is NOT a git repo root
+                        await searchForGitRepos(fullPath, depth + 1);
+                    }
+                }
+            } catch {}
+        };
+        
+        await searchForGitRepos(workspacePath);
+        return { success: true, repos };
+    });
+
+    connector.registerCommandHandler('get_git_status', async (data: any) => {
         const workspacePath = getWorkspacePath();
         if (!workspacePath) { return { success: false, error: 'No workspace open' }; }
+        
+        // Use provided repo path or default to workspace root
+        const repoPath = data?.repoPath || workspacePath;
+        
         try {
             const { execSync } = require('child_process');
-            const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: workspacePath, encoding: 'utf-8' }).trim();
-            const statusOut = execSync('git status --porcelain', { cwd: workspacePath, encoding: 'utf-8' });
+            const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: repoPath, encoding: 'utf-8' }).trim();
+            const statusOut = execSync('git status --porcelain', { cwd: repoPath, encoding: 'utf-8' });
             const lines = statusOut.split('\n').filter((l: string) => l.trim());
             const staged: any[] = [];
             const changed: any[] = [];
@@ -255,7 +340,31 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
                 if (y !== ' ' && y !== '?') { changed.push({ name: fileName, path: filePath, status: y === 'M' ? 'M' : y === 'D' ? 'D' : y }); }
                 if (x === '?' && y === '?') { untracked.push({ name: fileName, path: filePath, status: 'U' }); }
             });
-            return { success: true, branch, staged, changed, untracked };
+            
+            // Check commits ahead/behind remote
+            let ahead = 0;
+            let behind = 0;
+            try {
+                // First, try to fetch to get latest remote info (silently)
+                try {
+                    execSync('git fetch --quiet', { cwd: repoPath, timeout: 5000, stdio: 'pipe' });
+                } catch {}
+                
+                // Get upstream branch
+                const upstream = execSync(`git rev-parse --abbrev-ref ${branch}@{upstream}`, { cwd: repoPath, encoding: 'utf-8', stdio: 'pipe' }).trim();
+                
+                if (upstream) {
+                    // Count commits ahead and behind
+                    const aheadOut = execSync(`git rev-list --count ${upstream}..HEAD`, { cwd: repoPath, encoding: 'utf-8', stdio: 'pipe' }).trim();
+                    const behindOut = execSync(`git rev-list --count HEAD..${upstream}`, { cwd: repoPath, encoding: 'utf-8', stdio: 'pipe' }).trim();
+                    ahead = parseInt(aheadOut) || 0;
+                    behind = parseInt(behindOut) || 0;
+                }
+            } catch {
+                // No upstream or network issue, ignore
+            }
+            
+            return { success: true, branch, staged, changed, untracked, repoPath, ahead, behind };
         } catch (e: any) {
             return { success: false, error: e.message.includes('not a git repository') ? 'Not a git repository' : e.message };
         }
@@ -263,14 +372,15 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
 
     connector.registerCommandHandler('get_git_diff', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
             let diff = '';
             try {
-                diff = execSync(`git diff -- "${data.file}"`, { cwd: workspacePath, encoding: 'utf-8' });
-                if (!diff) { diff = execSync(`git diff --cached -- "${data.file}"`, { cwd: workspacePath, encoding: 'utf-8' }); }
+                diff = execSync(`git diff -- "${data.file}"`, { cwd: repoPath, encoding: 'utf-8' });
+                if (!diff) { diff = execSync(`git diff --cached -- "${data.file}"`, { cwd: repoPath, encoding: 'utf-8' }); }
                 if (!diff) {
-                    const content = fs.readFileSync(path.join(workspacePath, data.file), 'utf-8');
+                    const content = fs.readFileSync(path.join(repoPath, data.file), 'utf-8');
                     return { success: true, content };
                 }
             } catch { diff = ''; }
@@ -282,66 +392,108 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
 
     connector.registerCommandHandler('git_stage', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
-            execSync(`git add "${data.file}"`, { cwd: workspacePath });
+            execSync(`git add "${data.file}"`, { cwd: repoPath });
             return { success: true };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
     connector.registerCommandHandler('git_unstage', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
-            execSync(`git reset HEAD "${data.file}"`, { cwd: workspacePath });
+            execSync(`git reset HEAD "${data.file}"`, { cwd: repoPath });
             return { success: true };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
-    connector.registerCommandHandler('git_stage_all', async () => {
+    connector.registerCommandHandler('git_stage_all', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
-            execSync('git add -A', { cwd: workspacePath });
+            execSync('git add -A', { cwd: repoPath });
             return { success: true };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
-    connector.registerCommandHandler('git_unstage_all', async () => {
+    connector.registerCommandHandler('git_unstage_all', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
-            execSync('git reset HEAD', { cwd: workspacePath });
+            execSync('git reset HEAD', { cwd: repoPath });
             return { success: true };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
     connector.registerCommandHandler('git_commit', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         if (!data?.message) { return { success: false, error: 'No commit message' }; }
         try {
             const { execSync } = require('child_process');
             const escapedMsg = data.message.replace(/"/g, '\\"');
-            const result = execSync(`git commit -m "${escapedMsg}"`, { cwd: workspacePath, encoding: 'utf-8' });
+            const result = execSync(`git commit -m "${escapedMsg}"`, { cwd: repoPath, encoding: 'utf-8' });
             return { success: true, output: result };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
-    connector.registerCommandHandler('git_pull', async () => {
+    connector.registerCommandHandler('git_pull', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
-            const result = execSync('git pull', { cwd: workspacePath, encoding: 'utf-8', timeout: 30000 });
+            const result = execSync('git pull', { cwd: repoPath, encoding: 'utf-8', timeout: 30000 });
             return { success: true, output: result };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
-    connector.registerCommandHandler('git_push', async () => {
+    connector.registerCommandHandler('git_push', async (data: any) => {
         const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
         try {
             const { execSync } = require('child_process');
-            const result = execSync('git push', { cwd: workspacePath, encoding: 'utf-8', timeout: 30000 });
+            const result = execSync('git push', { cwd: repoPath, encoding: 'utf-8', timeout: 30000 });
             return { success: true, output: result };
+        } catch (e: any) { return { success: false, error: e.message }; }
+    });
+
+    connector.registerCommandHandler('git_sync', async (data: any) => {
+        const workspacePath = getWorkspacePath();
+        const repoPath = data?.repoPath || workspacePath;
+        try {
+            const { execSync } = require('child_process');
+            let output = '';
+            
+            // Pull first
+            try {
+                const pullResult = execSync('git pull', { cwd: repoPath, encoding: 'utf-8', timeout: 30000 });
+                output += 'Pull: ' + pullResult.trim() + '\n';
+            } catch (e: any) {
+                if (e.message.includes('Already up to date')) {
+                    output += 'Already up to date\n';
+                } else {
+                    throw e;
+                }
+            }
+            
+            // Then push
+            try {
+                const pushResult = execSync('git push', { cwd: repoPath, encoding: 'utf-8', timeout: 30000 });
+                output += 'Push: ' + pushResult.trim();
+            } catch (e: any) {
+                if (e.message.includes('Everything up-to-date')) {
+                    output += 'Everything up-to-date';
+                } else {
+                    throw e;
+                }
+            }
+            
+            return { success: true, output: output.trim() };
         } catch (e: any) { return { success: false, error: e.message }; }
     });
 
