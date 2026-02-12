@@ -10,6 +10,7 @@ import { getWebViewHTML } from '../webview';
 import { state, log, readBody } from './serverState';
 import { broadcastToSlaves } from './wsHandler';
 import { sendToChat, scanChatStorage, handleCommandAction } from './chatService';
+import { getTerminalBuffer, stripAnsi } from './cloudService';
 
 /** Start the HTTP server on the given port */
 export async function startHTTPServerAsync(port: number): Promise<boolean> {
@@ -438,22 +439,36 @@ function handleTerminalOutput(res: http.ServerResponse, pathname: string) {
         const terminal = terminals[termIdx];
         let output = '';
         let cwd = '';
+
+        // Try captured buffer first (from cloudService)
+        const buffered = getTerminalBuffer(terminal);
+        if (buffered) {
+            output = stripAnsi(buffered);
+            const lines = output.split('\n');
+            if (lines.length > 200) {
+                output = lines.slice(-200).join('\n');
+            }
+        }
+
+        // Try shell integration for CWD and fallback output
         try {
             const shellIntegration = (terminal as any).shellIntegration;
             if (shellIntegration) {
                 cwd = shellIntegration.cwd?.fsPath || '';
-                const executions = shellIntegration.executions || [];
-                const recentExecutions = Array.from(executions).slice(-20);
-                output = recentExecutions.map((exec: any) => {
-                    let text = '';
-                    if (exec.commandLine?.value) text += '> ' + exec.commandLine.value + '\n';
-                    if (exec.output) {
-                        try {
-                            for (const chunk of exec.output) { text += chunk; }
-                        } catch (e) { /* output may not be iterable */ }
-                    }
-                    return text;
-                }).join('\n');
+                if (!output) {
+                    const executions = shellIntegration.executions || [];
+                    const recentExecutions = Array.from(executions).slice(-20);
+                    output = recentExecutions.map((exec: any) => {
+                        let text = '';
+                        if (exec.commandLine?.value) text += '> ' + exec.commandLine.value + '\n';
+                        if (exec.output) {
+                            try {
+                                for (const chunk of exec.output) { text += chunk; }
+                            } catch (e) { /* output may not be iterable */ }
+                        }
+                        return text;
+                    }).join('\n');
+                }
             }
         } catch (e) {
             log(`Shell integration not available for terminal ${termIdx}: ${e}`);

@@ -13,6 +13,7 @@ import { startHTTPServerAsync } from './httpRouter';
 export { broadcastToClients } from './wsHandler';
 export { sendToChat, getChatHistory, getCurrentInbox, handleCommandAction } from './chatService';
 export { connectToCloud, disconnectFromCloud, isConnectedToCloud } from './cloudService';
+import { ensureTerminalDataCapture } from './cloudService';
 
 // Store extension context for lazy initialization
 let extensionContext: vscode.ExtensionContext | null = null;
@@ -32,6 +33,13 @@ export function getWorkspaceHash() {
 export function setExtensionContext(context: vscode.ExtensionContext, channel: vscode.OutputChannel) {
     extensionContext = context;
     state.outputChannel = channel;
+    // Start capturing terminal output early so data is ready
+    try {
+        ensureTerminalDataCapture();
+    } catch (e) {
+        // Don't let terminal capture failure prevent activation
+        console.error('[RemoteChatControl] Terminal capture init failed:', e);
+    }
 }
 
 /** Initialize the server module (called lazily when needed) */

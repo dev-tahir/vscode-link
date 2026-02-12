@@ -102,6 +102,17 @@ export function isConnectedToCloud(): boolean {
     return state.isCloudConnected && state.cloudConnector?.connected === true;
 }
 
+/** Get terminal buffer for a specific terminal */
+export function getTerminalBuffer(terminal: vscode.Terminal): string | undefined {
+    return terminalOutputBuffers.get(terminal);
+}
+
+/** Re-export stripAnsi for use by httpRouter */
+export { stripAnsi };
+
+/** Initialize terminal data capture - call early so buffers are ready */
+export { ensureTerminalDataCapture };
+
 /** Start periodic inbox sync to cloud */
 function startCloudInboxSync() {
     stopCloudInboxSync();
@@ -122,7 +133,79 @@ function stopCloudInboxSync() {
 }
 
 /** Register command handlers for terminal, files, and git proxy commands */
+// Terminal output buffer - captures data written to terminals
+const terminalOutputBuffers = new Map<vscode.Terminal, string>();
+const MAX_TERMINAL_BUFFER = 50000; // ~50KB per terminal
+let terminalDataListener: vscode.Disposable | null = null;
+
+function ensureTerminalDataCapture() {
+    if (terminalDataListener) { return; }
+    terminalDataListener = { dispose: () => {} } as vscode.Disposable;
+    
+    log('[Terminal] Setting up terminal capture using shell integration...');
+    
+    try {
+        // STABLE API: Track shell executions for command+output
+        const startDisposable = vscode.window.onDidStartTerminalShellExecution?.(async (event) => {
+            try {
+                const terminal = event.terminal;
+                const cmdLine = event.execution?.commandLine?.value;
+                
+                if (cmdLine) {
+                    let output = `> ${cmdLine}\n`;
+                    log(`[Terminal] Command started: ${cmdLine}`);
+                    
+                    // Read output as it streams
+                    const stream = event.execution?.read;
+                    if (stream) {
+                        for await (const data of stream()) {
+                            output += data;
+                            log(`[Terminal] Received ${data.length} chars`);
+                        }
+                    }
+                    
+                    // Store in buffer
+                    const existing = terminalOutputBuffers.get(terminal) || '';
+                    let updated = existing + output;
+                    if (updated.length > MAX_TERMINAL_BUFFER) {
+                        updated = updated.slice(-MAX_TERMINAL_BUFFER);
+                    }
+                    terminalOutputBuffers.set(terminal, updated);
+                    log(`[Terminal] Total buffered: ${updated.length} chars for "${terminal.name}"`);
+                }
+            } catch (err) {
+                log(`[Terminal] Execution capture error: ${err}`);
+            }
+        });
+        
+        if (startDisposable) {
+            terminalDataListener = startDisposable;
+            log('[Terminal] ✓ Shell execution monitoring active');
+        } else {
+            log('[Terminal] ✗ Shell integration not available (requires VS Code 1.93+)');
+        }
+
+        // Clean up buffers when terminals close
+        vscode.window.onDidCloseTerminal((terminal) => {
+            terminalOutputBuffers.delete(terminal);
+        });
+    } catch (e) {
+        log(`[Terminal] Capture setup error: ${e}`);
+    }
+}
+
+/** Strip ANSI escape codes for clean text display */
+function stripAnsi(str: string): string {
+    return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+              .replace(/\x1b\][^\x07]*\x07/g, '')
+              .replace(/\x1b[()][0-9A-B]/g, '')
+              .replace(/\r/g, '');
+}
+
 function registerProxyCommandHandlers(connector: CloudConnector) {
+    // Ensure terminal data capture is active
+    ensureTerminalDataCapture();
+
     // ========== TERMINAL COMMANDS ==========
 
     connector.registerCommandHandler('get_terminals', async () => {
@@ -137,33 +220,45 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
     connector.registerCommandHandler('get_terminal_output', async (data: any) => {
         const termIdx = data?.terminalId ?? 0;
         const terminals = vscode.window.terminals;
+        log(`[Terminal] get_terminal_output: termIdx=${termIdx}, totalTerminals=${terminals.length}, bufferMapSize=${terminalOutputBuffers.size}`);
         if (termIdx < 0 || termIdx >= terminals.length) {
             return { error: 'Terminal not found' };
         }
         const terminal = terminals[termIdx];
         let output = '';
         let cwd = '';
+
+        // Log buffer keys for debugging
+        const bufferKeys = Array.from(terminalOutputBuffers.keys()).map(t => t.name);
+        log(`[Terminal] Buffer keys: [${bufferKeys.join(', ')}], looking up: "${terminal.name}"`);
+
+        // Try captured buffer first (most reliable)
+        const buffered = terminalOutputBuffers.get(terminal);
+        log(`[Terminal] Buffer found: ${!!buffered}, length: ${buffered?.length ?? 0}`);
+        if (buffered) {
+            output = stripAnsi(buffered);
+            // Keep last ~200 lines
+            const lines = output.split('\n');
+            if (lines.length > 200) {
+                output = lines.slice(-200).join('\n');
+            }
+        }
+
+        // Try shell integration for CWD
         try {
             const shellIntegration = (terminal as any).shellIntegration;
+            log(`[Terminal] Shell integration available: ${!!shellIntegration}`);
             if (shellIntegration) {
                 cwd = shellIntegration.cwd?.fsPath || '';
-                const executions = shellIntegration.executions || [];
-                const recentExecutions = Array.from(executions).slice(-20);
-                output = recentExecutions.map((exec: any) => {
-                    let text = '';
-                    if (exec.commandLine?.value) { text += '> ' + exec.commandLine.value + '\n'; }
-                    if (exec.output) {
-                        try { for (const chunk of exec.output) { text += chunk; } } catch {}
-                    }
-                    return text;
-                }).join('\n');
             }
         } catch (e) {
             log(`Shell integration not available for terminal ${termIdx}: ${e}`);
         }
+
         if (!cwd) {
             cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
         }
+        log(`[Terminal] Returning output: ${output.length} chars, cwd: ${cwd}`);
         return { success: true, output, cwd, name: terminal.name };
     });
 
@@ -181,7 +276,23 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
             terminal = vscode.window.createTerminal('Remote');
         }
         terminal.show(false);
-        terminal.sendText(command);
+        
+        // Wait briefly for shell integration to activate on new terminals
+        const shellIntegration = (terminal as any).shellIntegration;
+        if (!shellIntegration) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        // Use executeCommand if available (captures output), otherwise sendText
+        const si = (terminal as any).shellIntegration;
+        if (si && typeof si.executeCommand === 'function') {
+            log(`[Terminal] Using shellIntegration.executeCommand for: ${command}`);
+            si.executeCommand(command);
+        } else {
+            log(`[Terminal] Shell integration not ready, using sendText for: ${command}`);
+            terminal.sendText(command);
+        }
+        
         return { success: true, terminalName: terminal.name };
     });
 
@@ -190,6 +301,17 @@ function registerProxyCommandHandlers(connector: CloudConnector) {
         terminal.show(false);
         const idx = vscode.window.terminals.indexOf(terminal);
         return { success: true, id: idx, name: terminal.name };
+    });
+
+    connector.registerCommandHandler('close_terminal', async (data: any) => {
+        const terminalId = data?.terminalId;
+        const terminals = vscode.window.terminals;
+        if (terminalId !== undefined && terminalId >= 0 && terminalId < terminals.length) {
+            const terminal = terminals[terminalId];
+            terminal.dispose();
+            return { success: true };
+        }
+        return { success: false, error: 'Terminal not found' };
     });
 
     // ========== FILES COMMANDS ==========

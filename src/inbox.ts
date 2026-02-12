@@ -284,7 +284,7 @@ function parseSessionFile(filePath: string): ChatSession | null {
                     }
                 }
                 
-                if (assistantText.trim() || pendingCommand || thinkingParts.length > 0 || toolInvocations.length > 0) {
+                if (assistantText.trim() || pendingCommand || thinkingParts.length > 0 || toolInvocations.length > 0 || (request.response && request.response.length > 0)) {
                     const assistantTimestamp = request.result?.timings?.totalElapsed ? 
                         (request.timestamp + request.result.timings.totalElapsed) : request.timestamp;
                     
