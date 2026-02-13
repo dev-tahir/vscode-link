@@ -1,4 +1,4 @@
-const {getInboxForWorkspace} = require('./out/inbox.js');
+const {getInboxForWorkspace} = require('../out/inbox.js');
 
 try {
     const inbox = getInboxForWorkspace('d14344c874d7f8b71ef1d57d284b18f0');
@@ -15,22 +15,16 @@ try {
         console.log(`  Title: ${s.title || '(no title)'}`);
         
         if (s.messages && s.messages.length > 0) {
-            // Show last 3 messages to see recent updates
             console.log('  Last 3 messages:');
             s.messages.slice(-3).forEach((m, idx) => {
                 const msgIdx = s.messages.length - 3 + idx + 1;
-                const thinkCount = m.thinking ? m.thinking.length : 0;
-                const thinkInfo = thinkCount > 0 ? ` [${thinkCount} thinking]` : '';
+                const thinkingParts = m.thinking?.thinkingParts?.length || 0;
+                const toolInvocations = m.thinking?.toolInvocations?.length || 0;
+                const thinkCount = thinkingParts + toolInvocations;
+                const thinkInfo = thinkCount > 0 ? ` [${thinkCount} thinking/tools]` : '';
                 const timestamp = m.timestamp ? new Date(m.timestamp).toLocaleString() : 'no timestamp';
                 console.log(`    ${msgIdx}. [${m.role}]${thinkInfo} ${timestamp}`);
-                console.log(`        ${m.text.substring(0, 60)}...`);
-                
-                // Show thinking titles if present
-                if (m.thinking && m.thinking.length > 0) {
-                    m.thinking.forEach((t, ti) => {
-                        console.log(`        💭 ${t.title}`);
-                    });
-                }
+                console.log(`        ${String(m.text || '').substring(0, 60)}...`);
             });
         }
     });

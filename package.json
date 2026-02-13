@@ -100,7 +100,9 @@
 		"vscode:prepublish": "npm run compile",
 		"compile": "tsc -p ./",
 		"watch": "tsc -watch -p ./",
-		"lint": "eslint src --ext ts"
+		"lint": "eslint src --ext ts",
+		"test:parser": "npm run compile && node testing/test-parser-feedback.js",
+		"test:app-view": "npm run compile && node testing/test-app-view-simulation.js"
 	},
 	"dependencies": {
 		"ws": "^8.19.0"

@@ -2,7 +2,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { ChatMessage, ChatSession, Inbox, ThinkingPart, PendingCommand, ThinkingSection, ToolInvocation } from './types';
+import { ChatMessage, ChatSession, Inbox, MessageTimelineItem, ThinkingPart, PendingCommand, ThinkingSection, ToolInvocation } from './types';
 
 // Get the workspace hash for the current VS Code window
 export function getCurrentWorkspaceHash(): string | null {
@@ -51,16 +51,32 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
     try {
         const files = fs.readdirSync(chatSessionsPath, { withFileTypes: true })
             .filter(f => f.isFile() && (f.name.endsWith('.json') || f.name.endsWith('.jsonl')));
+        const sessionsById = new Map<string, ChatSession>();
         
         for (const file of files) {
             const filePath = path.join(chatSessionsPath, file.name);
             const session = parseSessionFile(filePath);
             // Only include sessions that have at least 1 message
             if (session && session.messageCount > 0) {
-                inbox.sessions.push(session);
-                inbox.totalMessages += session.messageCount;
+                const existing = sessionsById.get(session.sessionId);
+                if (!existing) {
+                    sessionsById.set(session.sessionId, session);
+                    continue;
+                }
+
+                const isBetterSession =
+                    session.lastMessageAt > existing.lastMessageAt ||
+                    session.messageCount > existing.messageCount ||
+                    (session.filePath.endsWith('.jsonl') && !existing.filePath.endsWith('.jsonl'));
+
+                if (isBetterSession) {
+                    sessionsById.set(session.sessionId, session);
+                }
             }
         }
+
+        inbox.sessions = Array.from(sessionsById.values());
+        inbox.totalMessages = inbox.sessions.reduce((sum, session) => sum + session.messageCount, 0);
         
         // Sort sessions by last message time (most recent first)
         inbox.sessions.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
@@ -74,7 +90,59 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
 
 // Parse JSONL format (JSON Lines) where each line is a JSON object
 function parseJSONL(content: string): any {
-    const lines = content.trim().split('\n');
+    const lines: string[] = [];
+    let objectStart = -1;
+    let braceDepth = 0;
+    let inString = false;
+    let isEscaped = false;
+
+    for (let index = 0; index < content.length; index++) {
+        const ch = content[index];
+
+        if (objectStart === -1) {
+            if (ch === '{') {
+                objectStart = index;
+                braceDepth = 1;
+                inString = false;
+                isEscaped = false;
+            }
+            continue;
+        }
+
+        if (inString) {
+            if (isEscaped) {
+                isEscaped = false;
+            } else if (ch === '\\') {
+                isEscaped = true;
+            } else if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (ch === '{') {
+            braceDepth++;
+            continue;
+        }
+
+        if (ch === '}') {
+            braceDepth--;
+            if (braceDepth === 0) {
+                lines.push(content.slice(objectStart, index + 1));
+                objectStart = -1;
+            }
+        }
+    }
+
+    if (lines.length === 0) {
+        lines.push(...content.trim().split(/\r\n|\n|\r/).filter(line => !!line.trim()));
+    }
+
     let data: any = {};
     
     for (const line of lines) {
@@ -94,9 +162,8 @@ function parseJSONL(content: string): any {
             } else if (obj.kind === 2) {
                 // Array/complex update
                 if (obj.k && Array.isArray(obj.k) && obj.k.length > 0) {
-                    // Special handling for top-level array updates (appending)
+                    // Top-level arrays are append-style; nested arrays are snapshots
                     if (obj.k.length === 1 && Array.isArray(obj.v) && Array.isArray(data[obj.k[0]])) {
-                        // Append array elements instead of replacing
                         data[obj.k[0]].push(...obj.v);
                     } else {
                         // For nested paths, use setNestedProperty
@@ -140,6 +207,142 @@ function setNestedProperty(obj: any, path: string[], value: any) {
     }
     const lastKey = path[path.length - 1];
     current[lastKey] = value;
+}
+
+function collectOuterTextFromObject(value: any): string[] {
+    const collected: string[] = [];
+    const visited = new Set<any>();
+
+    const visit = (node: any) => {
+        if (node === null || node === undefined) return;
+
+        if (typeof node === 'string') {
+            if (node.trim()) {
+                collected.push(node);
+            }
+            return;
+        }
+
+        if (typeof node !== 'object') return;
+        if (visited.has(node)) return;
+        visited.add(node);
+
+        if (Array.isArray(node)) {
+            for (const entry of node) {
+                visit(entry);
+            }
+            return;
+        }
+
+        const textKeys = ['value', 'text', 'markdown', 'content', 'message', 'parts', 'items'];
+        for (const key of textKeys) {
+            if (Object.prototype.hasOwnProperty.call(node, key)) {
+                visit(node[key]);
+            }
+        }
+    };
+
+    visit(value);
+    return collected;
+}
+
+function extractOuterTextFromCodeBlocks(codeBlocks: any): string {
+    if (!Array.isArray(codeBlocks)) return '';
+
+    const parts: string[] = [];
+    for (const block of codeBlocks) {
+        if (!block || typeof block !== 'object') continue;
+
+        if (typeof block.markdownBeforeBlock === 'string' && block.markdownBeforeBlock.trim()) {
+            parts.push(block.markdownBeforeBlock);
+        }
+        if (typeof block.markdownAfterBlock === 'string' && block.markdownAfterBlock.trim()) {
+            parts.push(block.markdownAfterBlock);
+        }
+    }
+
+    return parts.join('\n').trim();
+}
+
+function cleanAssistantOuterText(text: string): string {
+    const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const lines = normalized.split('\n');
+    const cleaned: string[] = [];
+
+    let index = 0;
+    while (index < lines.length) {
+        if (lines[index].trim() === '```') {
+            let end = index + 1;
+            while (end < lines.length && lines[end].trim() === '') {
+                end++;
+            }
+
+            if (end < lines.length && lines[end].trim() === '```') {
+                index = end + 1;
+                continue;
+            }
+        }
+
+        cleaned.push(lines[index]);
+        index++;
+    }
+
+    return cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function normalizeFsPath(rawPath: string): string {
+    let fp = rawPath || '';
+    if (fp.match(/^\/[a-zA-Z]:\//)) {
+        fp = fp.substring(1);
+    }
+    return fp.replace(/\\/g, '/');
+}
+
+function replaceUriLinksWithFileTokens(text: string, fileUriMap: Map<string, { path: string; name: string }>): string {
+    let output = text;
+    for (const [uriKey, fileInfo] of fileUriMap) {
+        if (!fileInfo.path) continue;
+        const escapedUri = uriKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const linkPattern = new RegExp('\\[[^\\]]*\\]\\(' + escapedUri + '\\)', 'g');
+        output = output.replace(linkPattern, `[[FILE|${fileInfo.path}|${fileInfo.name}]]`);
+    }
+    return output;
+}
+
+function getToolDisplayText(item: any): string {
+    const past = item?.pastTenseMessage?.value;
+    const invocation = item?.invocationMessage?.value;
+    return (past || invocation || '').trim();
+}
+
+function getToolFallbackTitle(item: any): string {
+    const toolId = item?.toolId || 'tool';
+    const toolKind = item?.toolSpecificData?.kind;
+
+    if (toolKind === 'terminal') {
+        const command = item?.toolSpecificData?.commandLine?.original || item?.toolSpecificData?.commandLine?.toolEdited || '';
+        if (typeof command === 'string' && command.trim()) {
+            const short = command.trim().split('\n')[0];
+            return `Ran command: ${short.length > 120 ? short.slice(0, 120) + '…' : short}`;
+        }
+        return 'Ran terminal command';
+    }
+
+    if (toolKind === 'todoList') {
+        const todos = item?.toolSpecificData?.todoList;
+        const count = Array.isArray(todos) ? todos.length : 0;
+        return count > 0 ? `Updated todo list (${count} item${count !== 1 ? 's' : ''})` : 'Updated todo list';
+    }
+
+    return toolId;
+}
+
+function isConfirmedTool(item: any): boolean {
+    const confirmedType = item?.isConfirmed?.type;
+    if (typeof confirmedType === 'number') {
+        return confirmedType !== 0;
+    }
+    return !!item?.isConfirmed;
 }
 
 // Parse a single session JSON or JSONL file
@@ -187,6 +390,14 @@ function parseSessionFile(filePath: string): ChatSession | null {
                 const thinkingParts: ThinkingPart[] = [];
                 const toolInvocations: ToolInvocation[] = [];
                 let pendingCommand: PendingCommand | undefined;
+                const timeline: MessageTimelineItem[] = [];
+                const outerTextSegments: string[] = [];
+
+                const pushTextSegment = (segment: string) => {
+                    if (!segment) return;
+                    outerTextSegments.push(segment);
+                    timeline.push({ type: 'text', text: segment });
+                };
                 
                 // Collect file URI mappings from tool invocations
                 const fileUriMap: Map<string, { path: string; name: string }> = new Map();
@@ -195,25 +406,30 @@ function parseSessionFile(filePath: string): ChatSession | null {
                     // First pass: collect all file URIs and process items
                     for (const item of request.response) {
                         // Collect thinking parts
-                        if (item.kind === 'thinking' && item.value) {
+                        if (item.kind === 'thinking' && typeof item.value === 'string') {
                             // Skip empty thinking markers (vscodeReasoningDone)
                             if (item.value.trim()) {
-                                thinkingParts.push({
+                                const thinkingPart: ThinkingPart = {
                                     id: item.id,
                                     value: item.value.trim(),
                                     generatedTitle: item.generatedTitle
-                                });
+                                };
+                                thinkingParts.push(thinkingPart);
+                                timeline.push({ type: 'thinking', thinking: thinkingPart });
                             }
                         }
                         
                         // Collect tool invocations
                         if (item.kind === 'toolInvocationSerialized') {
+                            const detailText = getToolDisplayText(item);
+                            const fallbackTitle = getToolFallbackTitle(item);
                             const toolInvocation: ToolInvocation = {
                                 toolId: item.toolId || 'unknown',
                                 toolCallId: item.toolCallId || '',
                                 invocationMessage: item.invocationMessage?.value || '',
                                 pastTenseMessage: item.pastTenseMessage?.value || '',
-                                isConfirmed: item.isConfirmed?.type === 1,
+                                detailText: detailText || fallbackTitle,
+                                isConfirmed: isConfirmedTool(item),
                                 isComplete: item.isComplete || false
                             };
                             
@@ -223,7 +439,13 @@ function parseSessionFile(filePath: string): ChatSession | null {
                                 toolInvocation.commandLine = item.toolSpecificData.commandLine?.original || 
                                                              item.toolSpecificData.commandLine?.toolEdited || '';
                                 toolInvocation.language = item.toolSpecificData.language;
-                                toolInvocation.output = item.toolSpecificData.output || '';
+                                toolInvocation.cwd = item.toolSpecificData.cwd || '';
+                                const outputText = item.toolSpecificData.terminalCommandOutput?.text || item.toolSpecificData.output || '';
+                                toolInvocation.output = typeof outputText === 'string' ? outputText : '';
+                                const outputLines = item.toolSpecificData.terminalCommandOutput?.lineCount;
+                                if (typeof outputLines === 'number') {
+                                    toolInvocation.outputLineCount = outputLines;
+                                }
                                 
                                 // Check for pending (not confirmed) commands
                                 if (!item.isConfirmed && !item.toolSpecificData.terminalCommandState && toolInvocation.commandLine) {
@@ -233,36 +455,57 @@ function parseSessionFile(filePath: string): ChatSession | null {
                                         toolCallId: toolInvocation.toolCallId
                                     };
                                 }
+                            } else if (item.toolSpecificData?.kind === 'todoList') {
+                                toolInvocation.kind = 'todoList';
+                                if (Array.isArray(item.toolSpecificData.todoList)) {
+                                    toolInvocation.todoList = item.toolSpecificData.todoList.map((todo: any) => ({
+                                        id: todo?.id,
+                                        title: todo?.title,
+                                        status: todo?.status
+                                    }));
+                                }
                             }
                             
                             // Collect file URIs
                             if (item.pastTenseMessage?.uris) {
                                 for (const [uriKey, uri] of Object.entries(item.pastTenseMessage.uris) as [string, any][]) {
                                     if (uri && uri.path) {
-                                        let fp = uri.path;
-                                        if (fp.match(/^\/[a-zA-Z]:\//)) {
-                                            fp = fp.substring(1);
-                                        }
+                                        const fp = normalizeFsPath(uri.path);
+                                        if (!fp) continue;
                                         const fileName = fp.split('/').pop() || fp;
                                         fileUriMap.set(uriKey, { path: fp, name: fileName });
                                     }
                                 }
                             }
+
+                            if (item.invocationMessage?.uris) {
+                                for (const [uriKey, uri] of Object.entries(item.invocationMessage.uris) as [string, any][]) {
+                                    if (uri && uri.path && !fileUriMap.has(uriKey)) {
+                                        const fp = normalizeFsPath(uri.path);
+                                        if (!fp) continue;
+                                        const fileName = fp.split('/').pop() || fp;
+                                        fileUriMap.set(uriKey, { path: fp, name: fileName });
+                                    }
+                                }
+                            }
+
+                            toolInvocation.detailText = replaceUriLinksWithFileTokens(toolInvocation.detailText || '', fileUriMap);
+                            toolInvocation.pastTenseMessage = replaceUriLinksWithFileTokens(toolInvocation.pastTenseMessage || '', fileUriMap);
+                            toolInvocation.invocationMessage = replaceUriLinksWithFileTokens(toolInvocation.invocationMessage || '', fileUriMap);
                             
                             toolInvocations.push(toolInvocation);
+                            timeline.push({ type: 'tool', tool: toolInvocation });
                         }
                         
                         // Collect text responses
                         if (item.kind === 'inlineReference' && item.inlineReference) {
                             const ref = item.inlineReference;
-                            let fp = ref.fsPath || ref.path || '';
-                            if (fp.match(/^\/[a-zA-Z]:\//)) {
-                                fp = fp.substring(1);
+                            const fp = normalizeFsPath(ref.fsPath || ref.path || '');
+                            if (fp) {
+                                const fileName = item.name || fp.split('/').pop() || 'file';
+                                pushTextSegment(`[[FILE|${fp}|${fileName}]]`);
                             }
-                            fp = fp.replace(/\\/g, '/');
-                            const fileName = item.name || fp.split('/').pop() || 'file';
-                            assistantText += `[[FILE|${fp}|${fileName}]]`;
-                        } else if (item.value && typeof item.value === 'string') {
+                        } else if (item.value !== undefined) {
                             // Handle text responses
                             if (!item.kind || 
                                 item.kind === 'markdownContent' ||
@@ -271,19 +514,38 @@ function parseSessionFile(filePath: string): ChatSession | null {
                                  item.kind !== 'toolInvocationSerialized' &&
                                  item.kind !== 'thinking' &&
                                  item.kind !== 'textEditGroup')) {
-                                assistantText += item.value;
+                                if (typeof item.value === 'string') {
+                                    pushTextSegment(item.value);
+                                } else {
+                                    for (const textPart of collectOuterTextFromObject(item.value)) {
+                                        pushTextSegment(textPart);
+                                    }
+                                }
                             }
                         }
                     }
+
+                    assistantText += outerTextSegments.join('');
+                    assistantText = cleanAssistantOuterText(assistantText);
                     
                     // Apply file URI replacements
-                    for (const [uriKey, fileInfo] of fileUriMap) {
-                        const escapedUri = uriKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                        const linkPattern = new RegExp('\\[[^\\]]*\\]\\(' + escapedUri + '\\)', 'g');
-                        assistantText = assistantText.replace(linkPattern, `[[FILE|${fileInfo.path}|${fileInfo.name}]]`);
+                    assistantText = replaceUriLinksWithFileTokens(assistantText, fileUriMap);
+
+                    if (!assistantText.trim()) {
+                        assistantText = extractOuterTextFromCodeBlocks(request.result?.metadata?.codeBlocks);
+                        assistantText = cleanAssistantOuterText(assistantText);
+                        if (assistantText) {
+                            timeline.push({ type: 'text', text: assistantText });
+                        }
+                    }
+
+                    for (const segment of timeline) {
+                        if (segment.type === 'text' && segment.text) {
+                            segment.text = replaceUriLinksWithFileTokens(segment.text, fileUriMap);
+                        }
                     }
                 }
-                
+
                 if (assistantText.trim() || pendingCommand || thinkingParts.length > 0 || toolInvocations.length > 0 || (request.response && request.response.length > 0)) {
                     const assistantTimestamp = request.result?.timings?.totalElapsed ? 
                         (request.timestamp + request.result.timings.totalElapsed) : request.timestamp;
@@ -301,6 +563,11 @@ function parseSessionFile(filePath: string): ChatSession | null {
                         role: 'assistant',
                         text: assistantText.trim(),
                         thinking: thinkingSection,
+                        timeline: timeline.filter(segment => {
+                            if (segment.type === 'text') return !!segment.text && segment.text.trim().length > 0;
+                            if (segment.type === 'thinking') return !!segment.thinking?.value;
+                            return !!segment.tool;
+                        }),
                         model,
                         pendingCommand,
                         timestamp: assistantTimestamp

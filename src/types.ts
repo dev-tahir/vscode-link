@@ -11,12 +11,16 @@ export interface ToolInvocation {
     toolCallId: string;
     invocationMessage?: string;
     pastTenseMessage?: string;
+    detailText?: string;
     commandLine?: string;
+    cwd?: string;
     isConfirmed?: boolean;
     isComplete?: boolean;
     language?: string;
     output?: string;
-    kind?: 'terminal' | 'file' | 'edit' | 'other';
+    outputLineCount?: number;
+    todoList?: Array<{ id?: string | number; title?: string; status?: string }>;
+    kind?: 'terminal' | 'todoList' | 'file' | 'edit' | 'other';
 }
 
 export interface PendingCommand {
@@ -30,10 +34,18 @@ export interface ThinkingSection {
     toolInvocations: ToolInvocation[];
 }
 
+export interface MessageTimelineItem {
+    type: 'text' | 'thinking' | 'tool';
+    text?: string;
+    thinking?: ThinkingPart;
+    tool?: ToolInvocation;
+}
+
 export interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
     thinking?: ThinkingSection;  // Grouped thinking with tool invocations
+    timeline?: MessageTimelineItem[];
     model?: string;
     timestamp?: number;
     pendingCommand?: PendingCommand;

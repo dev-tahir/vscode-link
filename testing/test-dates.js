@@ -1,4 +1,4 @@
-const {getInboxForWorkspace} = require('./out/inbox.js');
+const {getInboxForWorkspace} = require('../out/inbox.js');
 
 try {
     const inbox = getInboxForWorkspace('d14344c874d7f8b71ef1d57d284b18f0');
