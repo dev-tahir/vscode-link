@@ -9,6 +9,7 @@ export interface ThinkingPart {
 export interface ToolInvocation {
     toolId: string;
     toolCallId: string;
+    generatedTitle?: string;
     invocationMessage?: string;
     pastTenseMessage?: string;
     detailText?: string;

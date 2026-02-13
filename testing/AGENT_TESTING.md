@@ -74,3 +74,17 @@ When changing parser or chat renderer:
 - Tests rely on real chat storage under VS Code `workspaceStorage`.
 - A failing `pendingMissingPairs` is acceptable when the conversation has fresh user prompts with no assistant response yet.
 - If output looks stale in browser, cache key/version changes in webview code may be needed.
+
+## Targeted Diagnostics
+
+Run parser feedback test:
+
+```powershell
+node testing/test-parser-feedback.js d14344c874d7f8b71ef1d57d284b18f0 21694af0-3c67-4c87-9908-1be32c21cb18
+```
+
+Run dropped-message analyzer:
+
+```powershell
+node testing/analyze-missing-messages.js d14344c874d7f8b71ef1d57d284b18f0 21694af0-3c67-4c87-9908-1be32c21cb18
+```

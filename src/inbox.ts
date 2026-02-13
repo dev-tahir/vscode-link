@@ -290,6 +290,22 @@ function cleanAssistantOuterText(text: string): string {
     return cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+function isUsefulProgressText(text: string): boolean {
+    const plain = (text || '').trim();
+    if (!plain) return false;
+
+    const genericStatuses = [
+        /^thinking\b/i,
+        /^running\b/i,
+        /^creating edits\b/i,
+        /^completed\b/i,
+        /^working\b/i,
+        /^processing\b/i
+    ];
+
+    return !genericStatuses.some(pattern => pattern.test(plain));
+}
+
 function normalizeFsPath(rawPath: string): string {
     let fp = rawPath || '';
     if (fp.match(/^\/[a-zA-Z]:\//)) {
@@ -392,6 +408,7 @@ function parseSessionFile(filePath: string): ChatSession | null {
                 let pendingCommand: PendingCommand | undefined;
                 const timeline: MessageTimelineItem[] = [];
                 const outerTextSegments: string[] = [];
+                const progressTextSegments: string[] = [];
 
                 const pushTextSegment = (segment: string) => {
                     if (!segment) return;
@@ -426,6 +443,7 @@ function parseSessionFile(filePath: string): ChatSession | null {
                             const toolInvocation: ToolInvocation = {
                                 toolId: item.toolId || 'unknown',
                                 toolCallId: item.toolCallId || '',
+                                generatedTitle: item.generatedTitle || '',
                                 invocationMessage: item.invocationMessage?.value || '',
                                 pastTenseMessage: item.pastTenseMessage?.value || '',
                                 detailText: detailText || fallbackTitle,
@@ -498,6 +516,13 @@ function parseSessionFile(filePath: string): ChatSession | null {
                         }
                         
                         // Collect text responses
+                        if (item.kind === 'progressTaskSerialized' && typeof item.content?.value === 'string') {
+                            const progressText = item.content.value.trim();
+                            if (isUsefulProgressText(progressText)) {
+                                progressTextSegments.push(progressText);
+                            }
+                        }
+
                         if (item.kind === 'inlineReference' && item.inlineReference) {
                             const ref = item.inlineReference;
                             const fp = normalizeFsPath(ref.fsPath || ref.path || '');
@@ -534,6 +559,13 @@ function parseSessionFile(filePath: string): ChatSession | null {
                     if (!assistantText.trim()) {
                         assistantText = extractOuterTextFromCodeBlocks(request.result?.metadata?.codeBlocks);
                         assistantText = cleanAssistantOuterText(assistantText);
+                        if (assistantText) {
+                            timeline.push({ type: 'text', text: assistantText });
+                        }
+                    }
+
+                    if (!assistantText.trim() && progressTextSegments.length > 0) {
+                        assistantText = cleanAssistantOuterText(progressTextSegments.join('\n'));
                         if (assistantText) {
                             timeline.push({ type: 'text', text: assistantText });
                         }
