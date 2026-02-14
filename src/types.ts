@@ -21,6 +21,10 @@ export interface ToolInvocation {
     output?: string;
     outputLineCount?: number;
     todoList?: Array<{ id?: string | number; title?: string; status?: string }>;
+    requiresApproval?: boolean;
+    approvalReason?: string;
+    approvalCwd?: string;
+    approvalCommand?: string;
     kind?: 'terminal' | 'todoList' | 'file' | 'edit' | 'other';
 }
 
@@ -28,6 +32,9 @@ export interface PendingCommand {
     command: string;
     language?: string;
     toolCallId: string;
+    reason?: string;
+    cwd?: string;
+    confirmationCommand?: string;
 }
 
 export interface ThinkingSection {

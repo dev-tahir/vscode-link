@@ -162,8 +162,18 @@ function parseJSONL(content: string): any {
             } else if (obj.kind === 2) {
                 // Array/complex update
                 if (obj.k && Array.isArray(obj.k) && obj.k.length > 0) {
-                    // Top-level arrays are append-style; nested arrays are snapshots
-                    if (obj.k.length === 1 && Array.isArray(obj.v) && Array.isArray(data[obj.k[0]])) {
+                    const targetValue = getNestedProperty(data, obj.k);
+                    const hasIndex = typeof obj.i === 'number';
+
+                    // Indexed insert into an existing array
+                    if (Array.isArray(targetValue) && hasIndex) {
+                        const insertValues = Array.isArray(obj.v) ? obj.v : [obj.v];
+                        targetValue.splice(obj.i, 0, ...insertValues);
+                    // Append-style update into existing array
+                    } else if (Array.isArray(targetValue) && Array.isArray(obj.v)) {
+                        targetValue.push(...obj.v);
+                    // Top-level array append when array already exists
+                    } else if (obj.k.length === 1 && Array.isArray(obj.v) && Array.isArray(data[obj.k[0]])) {
                         data[obj.k[0]].push(...obj.v);
                     } else {
                         // For nested paths, use setNestedProperty
@@ -178,6 +188,17 @@ function parseJSONL(content: string): any {
     }
     
     return data;
+}
+
+function getNestedProperty(obj: any, path: string[]): any {
+    let current = obj;
+    for (const key of path) {
+        if (current === null || current === undefined) {
+            return undefined;
+        }
+        current = current[key];
+    }
+    return current;
 }
 
 // Helper function to set a nested property using a path array
@@ -361,6 +382,72 @@ function isConfirmedTool(item: any): boolean {
     return !!item?.isConfirmed;
 }
 
+function getReadableValue(value: any): string {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return '';
+
+    if (typeof value.fsPath === 'string' && value.fsPath.trim()) return value.fsPath;
+    if (typeof value.path === 'string' && value.path.trim()) return value.path;
+    if (typeof value.external === 'string' && value.external.trim()) return value.external;
+
+    return '';
+}
+
+function getPendingApprovalReason(item: any): string {
+    const confirmation = item?.toolSpecificData?.confirmation;
+    const explicitMessage = confirmation?.message;
+    if (typeof explicitMessage === 'string' && explicitMessage.trim()) {
+        return explicitMessage.trim();
+    }
+
+    const confirmationCommand = confirmation?.commandLine;
+    if (typeof confirmationCommand === 'string' && confirmationCommand.trim()) {
+        return `Requires approval before running: ${confirmationCommand.trim()}`;
+    }
+
+    const cwdLabel = getReadableValue(confirmation?.cwdLabel) || getReadableValue(item?.toolSpecificData?.cwd);
+    if (typeof cwdLabel === 'string' && cwdLabel.trim()) {
+        return `Requires approval to run in: ${cwdLabel.trim()}`;
+    }
+
+    return 'Requires manual approval before command execution.';
+}
+
+function isPendingTerminalApproval(item: any, commandLine: string): boolean {
+    if (item?.toolSpecificData?.kind !== 'terminal') {
+        return false;
+    }
+
+    if (!commandLine || !commandLine.trim()) {
+        return false;
+    }
+
+    const isConfirmed = isConfirmedTool(item);
+    if (isConfirmed) {
+        return false;
+    }
+
+    const terminalState = item?.toolSpecificData?.terminalCommandState;
+    const hasTerminalState = terminalState !== undefined && terminalState !== null;
+    if (!hasTerminalState) {
+        return true;
+    }
+
+    const stateType = typeof terminalState;
+    if (stateType === 'string') {
+        const normalized = terminalState.toLowerCase();
+        return normalized !== 'completed' && normalized !== 'done' && normalized !== 'failed' && normalized !== 'cancelled';
+    }
+
+    if (stateType === 'object') {
+        const status = String(terminalState.status || terminalState.state || '').toLowerCase();
+        if (!status) return true;
+        return status !== 'completed' && status !== 'done' && status !== 'failed' && status !== 'cancelled';
+    }
+
+    return true;
+}
+
 // Parse a single session JSON or JSONL file
 function parseSessionFile(filePath: string): ChatSession | null {
     try {
@@ -456,8 +543,9 @@ function parseSessionFile(filePath: string): ChatSession | null {
                                 toolInvocation.kind = 'terminal';
                                 toolInvocation.commandLine = item.toolSpecificData.commandLine?.original || 
                                                              item.toolSpecificData.commandLine?.toolEdited || '';
+                                const terminalCommandLine = toolInvocation.commandLine || '';
                                 toolInvocation.language = item.toolSpecificData.language;
-                                toolInvocation.cwd = item.toolSpecificData.cwd || '';
+                                toolInvocation.cwd = getReadableValue(item.toolSpecificData.cwd) || '';
                                 const outputText = item.toolSpecificData.terminalCommandOutput?.text || item.toolSpecificData.output || '';
                                 toolInvocation.output = typeof outputText === 'string' ? outputText : '';
                                 const outputLines = item.toolSpecificData.terminalCommandOutput?.lineCount;
@@ -466,11 +554,24 @@ function parseSessionFile(filePath: string): ChatSession | null {
                                 }
                                 
                                 // Check for pending (not confirmed) commands
-                                if (!item.isConfirmed && !item.toolSpecificData.terminalCommandState && toolInvocation.commandLine) {
+                                const pendingApproval = isPendingTerminalApproval(item, terminalCommandLine);
+                                if (pendingApproval) {
+                                    const approvalReason = getPendingApprovalReason(item);
+                                    const approvalCwd = getReadableValue(item.toolSpecificData?.confirmation?.cwdLabel) || toolInvocation.cwd;
+                                    const approvalCommand = item.toolSpecificData?.confirmation?.commandLine;
+
+                                    toolInvocation.requiresApproval = true;
+                                    toolInvocation.approvalReason = approvalReason;
+                                    toolInvocation.approvalCwd = approvalCwd;
+                                    toolInvocation.approvalCommand = approvalCommand;
+
                                     pendingCommand = {
-                                        command: toolInvocation.commandLine,
+                                        command: terminalCommandLine,
                                         language: toolInvocation.language,
-                                        toolCallId: toolInvocation.toolCallId
+                                        toolCallId: toolInvocation.toolCallId,
+                                        reason: approvalReason,
+                                        cwd: approvalCwd,
+                                        confirmationCommand: approvalCommand
                                     };
                                 }
                             } else if (item.toolSpecificData?.kind === 'todoList') {
