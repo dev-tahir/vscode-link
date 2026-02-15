@@ -134,3 +134,73 @@ A fix is done when:
 - parser emits approval payload (`reason`, command, cwd) for that item,
 - standalone chat view renders approval-required box with that payload,
 - compile + parser feedback + app-view simulation all pass.
+
+## 10) sequenceappendjson (generic missing-feature workflow)
+
+Purpose:
+
+- `sequenceappendjson` is not hardcoded to one problem.
+- It answers:
+  - feature requested,
+  - whether source JSON has it,
+  - evidence paths found,
+  - exact “how to add if missing” steps.
+
+Output location:
+
+- `testing/extract-minimal-json.js` writes by default to:
+  - `src/server/sequenceappendjson-<workspaceHash>-<sessionId>.json`
+
+CLI:
+
+```powershell
+node testing/extract-minimal-json.js <sessionFile> [outFile] [featureName] [checkPathsCsv]
+```
+
+Examples:
+
+```powershell
+# Generic feature check
+node testing/extract-minimal-json.js <sessionFile> "" myFeature "root.myFeature,requests[].response[].myFeature"
+
+# Chat runtime example (only as input, not hardcoded in script)
+node testing/extract-minimal-json.js <sessionFile> "" chatRuntimeStatus "chatRuntimeStatus,requests[].response[].toolSpecificData.chatStatus"
+```
+
+`sequenceappendjson` fields:
+
+- `requestedFeature`
+- `existsInSource`
+- `checkedPaths`
+- `evidence[]` (path + value preview)
+- `howToAddIfMissing`:
+  - producer contract template
+  - extraction mapping step
+  - renderer step
+
+If feature is missing:
+
+1. Add stable source field(s) in producer payload.
+2. Map field(s) into `sequenceappendjson` at extract time.
+3. Render it in `standalone/render-chat-json.js`.
+
+Preview support:
+
+- `standalone/render-chat-json.js` renders a generic `sequenceappendjson` card.
+- It shows requested feature, existence, and evidence count.
+
+Required agent workflow (must follow in order):
+
+1. Extract JSON.
+  - Run:
+    - `node testing/extract-minimal-json.js <sessionFile> "" <featureName> "<checkPathsCsv>"`
+2. Inspect extracted JSON.
+  - Check `sequenceappendjson.existsInSource` and `sequenceappendjson.evidence`.
+  - If field/feature is missing, update `testing/extract-minimal-json.js` and run extraction again.
+  - Repeat this extract → check cycle until `existsInSource` is true (successful detection).
+3. After feature is visible in JSON, update renderer.
+  - Edit `standalone/render-chat-json.js` to show that feature in UI.
+
+Completion rule:
+
+- Do not move to renderer changes before extraction is confirmed successful.

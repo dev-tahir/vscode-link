@@ -691,6 +691,22 @@ function parseSessionFile(filePath: string): ChatSession | null {
                             toolInvocations
                         };
                     }
+
+                    // Determine message status from modelState
+                    let messageStatus: 'complete' | 'in-progress' | 'canceled' | 'error' = 'complete';
+                    if (request.modelState) {
+                        if (request.modelState.completedAt) {
+                            messageStatus = 'complete';
+                        } else if (request.modelState.value === 0) {
+                            messageStatus = 'in-progress';
+                        }
+                    } else if (request.isCanceled) {
+                        messageStatus = 'canceled';
+                    } else if (request.result?.error) {
+                        messageStatus = 'error';
+                    } else if (pendingCommand) {
+                        messageStatus = 'in-progress';
+                    }
                     
                     messages.push({
                         role: 'assistant',
@@ -703,7 +719,8 @@ function parseSessionFile(filePath: string): ChatSession | null {
                         }),
                         model,
                         pendingCommand,
-                        timestamp: assistantTimestamp
+                        timestamp: assistantTimestamp,
+                        status: messageStatus
                     });
                 }
             }

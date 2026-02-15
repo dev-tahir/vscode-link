@@ -57,6 +57,7 @@ export interface ChatMessage {
     model?: string;
     timestamp?: number;
     pendingCommand?: PendingCommand;
+    status?: 'complete' | 'in-progress' | 'canceled' | 'error';
 }
 
 export interface ChatSession {
