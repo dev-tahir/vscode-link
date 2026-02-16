@@ -25,39 +25,54 @@ export async function sendToChat(
 
     try {
         let note: string | undefined;
+        let sessionOpened = false;
 
         if (sessionMode === 'new') {
             await vscode.commands.executeCommand('workbench.action.chat.newChat');
             await new Promise(r => setTimeout(r, 300));
             note = 'Created new chat';
+            sessionOpened = true;
         } else if (sessionMode === 'session' && sessionId) {
             log(`Target session: ${sessionId}`);
-            note = 'Sent to session';
+            try {
+                const encodedSessionId = Buffer.from(sessionId).toString('base64');
+                const sessionUri = vscode.Uri.parse(`vscode-chat-session://local/${encodedSessionId}`);
+                await vscode.commands.executeCommand('vscode.open', sessionUri);
+                note = 'Opened session';
+                sessionOpened = true;
+                await new Promise(r => setTimeout(r, 500));
+            } catch (e) {
+                log(`Session open error: ${e}`);
+                note = 'Session open failed, sending to current';
+            }
         }
 
-        // Use the VS Code Chat API to send message directly
-        try {
+        // If we opened/created a session, use VS Code commands to send
+        if (sessionOpened || sessionMode === 'current') {
+            try {
+                await vscode.commands.executeCommand('workbench.action.chat.focusInput');
+            } catch {
+                await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
+            }
+            await new Promise(r => setTimeout(r, 300));
+
+            await vscode.commands.executeCommand('type', { text: message });
+            await new Promise(r => setTimeout(r, 300));
+
+            // Try submit, fallback to Enter key
+            try {
+                await vscode.commands.executeCommand('workbench.action.chat.submit');
+            } catch {
+                await vscode.commands.executeCommand('type', { text: '\n' });
+            }
+            log('Message sent via type + submit');
+        } else {
+            // For cases where we couldn't determine session, use chat.open API
             await vscode.commands.executeCommand('workbench.action.chat.open', {
                 query: message,
                 isPartialQuery: false
             });
-            log('Message sent via chat.open API');
-        } catch (e1) {
-            log(`chat.open failed: ${e1}, trying alternative...`);
-
-            try {
-                await vscode.commands.executeCommand('workbench.panel.chat.view.copilot.focus');
-                await new Promise(r => setTimeout(r, 300));
-                await vscode.commands.executeCommand('editor.action.selectAll');
-                await new Promise(r => setTimeout(r, 100));
-                await vscode.commands.executeCommand('type', { text: message });
-                await new Promise(r => setTimeout(r, 200));
-                await vscode.commands.executeCommand('workbench.action.chat.submit');
-                log('Message sent via type + submit');
-            } catch (e2) {
-                log(`Alternative also failed: ${e2}`);
-                throw e2;
-            }
+            log('Message sent via chat.open');
         }
 
         // Notify clients
