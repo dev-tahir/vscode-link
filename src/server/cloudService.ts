@@ -8,6 +8,35 @@ import { state, log } from './serverState';
 import { sendToChat, handleCommandAction, getCurrentInbox } from './chatService';
 import { startFileWatcher, stopFileWatcher } from './fileWatcher';
 
+// Optional callbacks set by extension.ts
+let onNotLinkedCallback: (() => void) | null = null;
+let onAccountInfoCallback: ((name: string | null, email: string | null) => void) | null = null;
+
+/**
+ * Set callbacks from extension.ts (called once during activation)
+ */
+export function setCloudEventCallbacks(callbacks: {
+    onNotLinked?: () => void;
+    onAccountInfo?: (name: string | null, email: string | null) => void;
+}) {
+    onNotLinkedCallback = callbacks.onNotLinked || null;
+    onAccountInfoCallback = callbacks.onAccountInfo || null;
+}
+
+/**
+ * Get account name from active cloud connector, or null if not linked.
+ */
+export function getAccountName(): string | null {
+    return state.cloudConnector?.accountName ?? null;
+}
+
+/**
+ * Get account email from active cloud connector, or null if not linked.
+ */
+export function getAccountEmail(): string | null {
+    return state.cloudConnector?.accountEmail ?? null;
+}
+
 /**
  * Connect to a remote cloud server (Cloud Run, etc.)
  * Extension becomes a WebSocket client
@@ -45,6 +74,8 @@ export async function connectToCloud(serverUrl: string): Promise<boolean> {
         onInboxRequest: () => getCurrentInbox(),
         onSendChat: sendToChat,
         onCommandAction: handleCommandAction,
+        onNotLinked: onNotLinkedCallback || undefined,
+        onAccountInfo: onAccountInfoCallback || undefined,
         onSendAndWait: async (message: string, model?: string, sessionMode?: string, sessionId?: string, maxWait?: number) => {
             const beforeSend = Date.now();
             await sendToChat(message, model, sessionMode, sessionId);
@@ -83,6 +114,76 @@ export async function connectToCloud(serverUrl: string): Promise<boolean> {
     return success;
 }
 
+/**
+ * Connect to cloud server and link using a pre-supplied code (from vscode:// deep link).
+ * If already connected to the same server, it's a no-op (link was already done).
+ */
+export async function connectToCloudWithCode(serverUrl: string, linkCode: string): Promise<boolean> {
+    const { ensureInitialized } = require('./index');
+    ensureInitialized();
+
+    // If already connected to this server, just confirm
+    if (state.isCloudConnected && state.cloudConnector?.connected) {
+        log('Already connected to cloud server via deep link');
+        return true;
+    }
+
+    // Disconnect existing connector if pointing elsewhere
+    if (state.cloudConnector) {
+        state.cloudConnector.disconnect();
+        state.cloudConnector = null;
+        state.isCloudConnected = false;
+    }
+
+    // Create connector and pre-supply the link code so no prompt is shown
+    state.cloudConnector = new CloudConnector(state.outputChannel!);
+    
+    const workspaceName = vscode.workspace.name ||
+        vscode.workspace.workspaceFolders?.[0]?.name ||
+        'VS Code';
+    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    state.cloudConnector.setWorkspaceInfo(
+        state.currentWorkspaceHash || 'unknown',
+        workspaceName,
+        workspacePath
+    );
+
+    state.cloudConnector.setCallbacks({
+        onInboxRequest: () => getCurrentInbox(),
+        onSendChat: sendToChat,
+        onCommandAction: handleCommandAction,
+        onNotLinked: onNotLinkedCallback || undefined,
+        onAccountInfo: onAccountInfoCallback || undefined,
+        onSendAndWait: async (message, model?, sessionMode?, sessionId?, maxWait?) => {
+            const beforeSend = Date.now();
+            await sendToChat(message, model, sessionMode, sessionId);
+            const effectiveWorkspace = state.currentWorkspaceHash || inbox.getCurrentWorkspaceHash();
+            if (!effectiveWorkspace) { return { error: 'No workspace detected' }; }
+            return await inbox.waitForNewReply(effectiveWorkspace, beforeSend, maxWait || 60000);
+        }
+    });
+
+    registerProxyCommandHandlers(state.cloudConnector);
+
+    // Set the code so sendRegistration uses it without prompting
+    state.cloudConnector.setPendingLinkCode(linkCode);
+
+    const success = await state.cloudConnector.connect(serverUrl);
+    state.isCloudConnected = success;
+
+    if (success) {
+        log('Connected to cloud server via deep link');
+        startFileWatcher();
+        if (state.cloudConnector?.connected) {
+            state.cloudConnector.sendInboxUpdate();
+        }
+    } else {
+        log('Deep link connection failed');
+    }
+
+    return success;
+}
+
 /** Disconnect from cloud server */
 export function disconnectFromCloud(): void {
     if (state.cloudConnector) {
@@ -100,6 +201,38 @@ export function disconnectFromCloud(): void {
 /** Check if connected to cloud */
 export function isConnectedToCloud(): boolean {
     return state.isCloudConnected && state.cloudConnector?.connected === true;
+}
+
+/** Unlink account - clears saved link token and disconnects */
+export async function unlinkAccount(): Promise<void> {
+    if (state.cloudConnector) {
+        await state.cloudConnector.clearLinkToken();
+        state.cloudConnector.disconnect();
+        state.cloudConnector = null;
+    } else {
+        // No current connector, just clear the token from settings
+        const config = vscode.workspace.getConfiguration('remoteChatControl');
+        await config.update('linkToken', undefined, vscode.ConfigurationTarget.Global);
+    }
+    state.isCloudConnected = false;
+    stopFileWatcher();
+    log('Account unlinked and disconnected');
+}
+
+/** Re-link account - clear link token and reconnect so extension prompts for new code */
+export async function relinkAccount(): Promise<void> {
+    const config = vscode.workspace.getConfiguration('remoteChatControl');
+    const serverUrl = (config.get<string>('serverUrl') || config.get<string>('cloudServerUrl') || '').trim();
+    
+    await unlinkAccount();
+    
+    if (serverUrl) {
+        log('Re-linking account with new code...');
+        const success = await connectToCloud(serverUrl);
+        if (!success) {
+            log('Re-link connection failed');
+        }
+    }
 }
 
 /** Get terminal buffer for a specific terminal */

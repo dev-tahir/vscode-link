@@ -12,7 +12,7 @@ import { startHTTPServerAsync } from './httpRouter';
 // ========== Re-exports (public API consumed by extension.ts and instanceManager.ts) ==========
 export { broadcastToClients } from './wsHandler';
 export { sendToChat, getChatHistory, getCurrentInbox, handleCommandAction } from './chatService';
-export { connectToCloud, disconnectFromCloud, isConnectedToCloud } from './cloudService';
+export { connectToCloud, connectToCloudWithCode, disconnectFromCloud, isConnectedToCloud, unlinkAccount, relinkAccount, setCloudEventCallbacks, getAccountName, getAccountEmail } from './cloudService';
 import { ensureTerminalDataCapture } from './cloudService';
 
 // Store extension context for lazy initialization

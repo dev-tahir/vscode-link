@@ -32,6 +32,10 @@ export class CloudConnector {
     private workspaceHash: string;
     private workspaceName: string;
     private workspacePath: string;
+    private linkToken: string | null = null;
+    private pendingLinkCode: string | null = null; // Code pre-supplied via vscode:// deep link
+    private _accountName: string | null = null;
+    private _accountEmail: string | null = null;
     
     // Command handlers
     private commandHandlers: Map<string, CommandHandler> = new Map();
@@ -41,6 +45,8 @@ export class CloudConnector {
     private onSendChatCallback: ((message: string, model?: string, sessionMode?: string, sessionId?: string) => Promise<any>) | null = null;
     private onCommandActionCallback: ((action: string) => Promise<void>) | null = null;
     private onSendAndWaitCallback: ((message: string, model?: string, sessionMode?: string, sessionId?: string, maxWait?: number) => Promise<any>) | null = null;
+    private onNotLinkedCallback: (() => void) | null = null;
+    private onAccountInfoCallback: ((name: string | null, email: string | null) => void) | null = null;
 
     constructor(outputChannel: vscode.OutputChannel) {
         this.outputChannel = outputChannel;
@@ -78,11 +84,29 @@ export class CloudConnector {
         onSendChat: (message: string, model?: string, sessionMode?: string, sessionId?: string) => Promise<any>;
         onCommandAction: (action: string) => Promise<void>;
         onSendAndWait?: (message: string, model?: string, sessionMode?: string, sessionId?: string, maxWait?: number) => Promise<any>;
+        onNotLinked?: () => void;
+        onAccountInfo?: (name: string | null, email: string | null) => void;
     }) {
         this.onInboxRequestCallback = callbacks.onInboxRequest;
         this.onSendChatCallback = callbacks.onSendChat;
         this.onCommandActionCallback = callbacks.onCommandAction;
         this.onSendAndWaitCallback = callbacks.onSendAndWait || null;
+        this.onNotLinkedCallback = callbacks.onNotLinked || null;
+        this.onAccountInfoCallback = callbacks.onAccountInfo || null;
+    }
+
+    /**
+     * Get account name (null if not linked/signed in)
+     */
+    get accountName(): string | null {
+        return this._accountName;
+    }
+
+    /**
+     * Get account email (null if not linked/signed in)
+     */
+    get accountEmail(): string | null {
+        return this._accountEmail;
     }
 
     /**
@@ -93,6 +117,36 @@ export class CloudConnector {
     }
 
     /**
+     * Load link token from VS Code settings
+     */
+    private async loadLinkToken() {
+        const config = vscode.workspace.getConfiguration('remoteChatControl');
+        this.linkToken = config.get<string>('linkToken') || null;
+        if (this.linkToken) {
+            this.log('Loaded existing link token from settings');
+        }
+    }
+
+    /**
+     * Save link token to VS Code settings
+     */
+    private async saveLinkToken(token: string) {
+        const config = vscode.workspace.getConfiguration('remoteChatControl');
+        await config.update('linkToken', token, vscode.ConfigurationTarget.Global);
+        this.log('Saved link token to settings');
+    }
+
+    /**
+     * Clear link token (for unlinking)
+     */
+    async clearLinkToken() {
+        const config = vscode.workspace.getConfiguration('remoteChatControl');
+        await config.update('linkToken', undefined, vscode.ConfigurationTarget.Global);
+        this.linkToken = null;
+        this.log('Cleared link token');
+    }
+
+    /**
      * Connect to cloud server
      */
     async connect(serverUrl: string): Promise<boolean> {
@@ -100,6 +154,9 @@ export class CloudConnector {
             this.log('Already connected or connecting');
             return this.isConnected;
         }
+
+        // Load link token from settings
+        await this.loadLinkToken();
 
         // Ensure URL ends with /extension for the extension endpoint
         let wsUrl = serverUrl;
@@ -197,8 +254,35 @@ export class CloudConnector {
                     
                 case 'registration_confirmed':
                     this.log('Registration confirmed by server');
+                    this._accountName = msg.userName || null;
+                    this._accountEmail = msg.userEmail || null;
+                    if (this.onAccountInfoCallback) {
+                        this.onAccountInfoCallback(this._accountName, this._accountEmail);
+                    }
                     // Send initial inbox state
                     this.sendInboxUpdate();
+                    break;
+                    
+                case 'link_confirmed':
+                    this.log('Link confirmed! Received link token');
+                    this.linkToken = msg.linkToken;
+                    this._accountName = msg.userName || null;
+                    this._accountEmail = msg.userEmail || null;
+                    // Save link token to settings
+                    this.saveLinkToken(msg.linkToken);
+                    if (this.onAccountInfoCallback) {
+                        this.onAccountInfoCallback(this._accountName, this._accountEmail);
+                    }
+                    vscode.window.showInformationMessage('Successfully linked to your account!');
+                    // Send initial inbox state
+                    this.sendInboxUpdate();
+                    break;
+                    
+                case 'link_error':
+                    this.log(`Link error: ${msg.error}`);
+                    vscode.window.showErrorMessage(`Link failed: ${msg.error}`);
+                    // Try again with registration
+                    this.sendRegistration();
                     break;
                     
                 case 'request_inbox':
@@ -232,14 +316,50 @@ export class CloudConnector {
         }
     }
 
-    private sendRegistration() {
-        this.send({
-            type: 'register_extension',
-            workspaceHash: this.workspaceHash,
-            workspaceName: this.workspaceName,
-            workspacePath: this.workspacePath,
-            timestamp: Date.now()
-        });
+    /**
+     * Pre-supply a link code (from vscode:// URI) to skip the prompt
+     */
+    setPendingLinkCode(code: string) {
+        this.pendingLinkCode = code.trim().toUpperCase();
+        this.log(`Pending link code set: ${this.pendingLinkCode}`);
+    }
+
+    private async sendRegistration() {
+        // If we have a link token, use it to register
+        if (this.linkToken) {
+            this.send({
+                type: 'register_extension',
+                linkToken: this.linkToken,
+                workspaceHash: this.workspaceHash,
+                workspaceName: this.workspaceName,
+                workspacePath: this.workspacePath,
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        // Use pre-supplied code (from vscode:// deep link) if available
+        const code = this.pendingLinkCode;
+        this.pendingLinkCode = null;
+        
+        if (code) {
+            this.send({
+                type: 'link_with_code',
+                code: code.trim().toUpperCase(),
+                workspaceHash: this.workspaceHash,
+                workspaceName: this.workspaceName,
+                workspacePath: this.workspacePath,
+                timestamp: Date.now()
+            });
+            return;
+        }
+        
+        // No link token and no deep-link code — not signed in
+        this.log('No link token found — not signed in');
+        if (this.onNotLinkedCallback) {
+            this.onNotLinkedCallback();
+        }
+        this.disconnect();
     }
 
     private async handleCommand(msg: any) {
@@ -396,7 +516,7 @@ export class CloudConnector {
     }
 
     /**
-     * Disconnect from cloud server
+     * Disconnect from cloud server (and clear account info)
      */
     disconnect() {
         this.isRunning = false;
@@ -413,6 +533,8 @@ export class CloudConnector {
         }
         
         this.isConnected = false;
+        this._accountName = null;
+        this._accountEmail = null;
         this.log('Disconnected from cloud server');
     }
 

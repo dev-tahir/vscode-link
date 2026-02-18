@@ -63,6 +63,26 @@
 		],
 		"commands": [
 			{
+				"command": "remoteChatControl.toggleVsMobile",
+				"title": "VS Code Mobile: Toggle Connection",
+				"icon": "$(cloud)"
+			},
+			{
+				"command": "remoteChatControl.toggleLocalhost",
+				"title": "VS Code Mobile: Toggle Localhost Connection",
+				"icon": "$(server)"
+			},
+			{
+				"command": "remoteChatControl.signIn",
+				"title": "VS Code Mobile: Sign In",
+				"icon": "$(link-external)"
+			},
+			{
+				"command": "remoteChatControl.logout",
+				"title": "VS Code Mobile: Log Out",
+				"icon": "$(sign-out)"
+			},
+			{
 				"command": "remoteChatControl.connectCloud",
 				"title": "Remote Chat: Connect to Server",
 				"icon": "$(cloud)"
@@ -74,6 +94,14 @@
 			{
 				"command": "remoteChatControl.sendMessage",
 				"title": "Remote Chat: Send Message"
+			},
+			{
+				"command": "remoteChatControl.unlinkAccount",
+				"title": "Remote Chat: Unlink Account"
+			},
+			{
+				"command": "remoteChatControl.relinkAccount",
+				"title": "Remote Chat: Re-link Account"
 			},
 			{
 				"command": "remoteChatControl.showOutput",
@@ -92,6 +120,11 @@
 					"type": "boolean",
 					"default": false,
 					"description": "Auto-connect to server on startup"
+				},
+				"remoteChatControl.linkToken": {
+					"type": "string",
+					"default": "",
+					"description": "Account link token (automatically managed)"
 				}
 			}
 		}
