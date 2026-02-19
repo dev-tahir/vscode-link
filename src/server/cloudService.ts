@@ -116,19 +116,13 @@ export async function connectToCloud(serverUrl: string): Promise<boolean> {
 
 /**
  * Connect to cloud server and link using a pre-supplied code (from vscode:// deep link).
- * If already connected to the same server, it's a no-op (link was already done).
+ * Always re-links with fresh code, even if already connected.
  */
 export async function connectToCloudWithCode(serverUrl: string, linkCode: string): Promise<boolean> {
     const { ensureInitialized } = require('./index');
     ensureInitialized();
 
-    // If already connected to this server, just confirm
-    if (state.isCloudConnected && state.cloudConnector?.connected) {
-        log('Already connected to cloud server via deep link');
-        return true;
-    }
-
-    // Disconnect existing connector if pointing elsewhere
+    // Disconnect any existing connector so we start fresh
     if (state.cloudConnector) {
         state.cloudConnector.disconnect();
         state.cloudConnector = null;
@@ -165,7 +159,8 @@ export async function connectToCloudWithCode(serverUrl: string, linkCode: string
 
     registerProxyCommandHandlers(state.cloudConnector);
 
-    // Set the code so sendRegistration uses it without prompting
+    // Clear any saved link token so the fresh code is used, then set the code
+    await state.cloudConnector.clearLinkToken();
     state.cloudConnector.setPendingLinkCode(linkCode);
 
     const success = await state.cloudConnector.connect(serverUrl);

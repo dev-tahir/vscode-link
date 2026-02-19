@@ -1,0 +1,7 @@
+**/.env
+**/.env.*
+standalone/
+testing/
+**/*.md
+**/*.json
+.git/
