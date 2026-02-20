@@ -463,7 +463,7 @@ export class CloudConnector {
     }
 
     /**
-     * Send inbox update to cloud server
+     * Send inbox update to cloud server (reads inbox internally).
      */
     sendInboxUpdate() {
         if (!this.isConnected || !this.onInboxRequestCallback) return;
@@ -477,6 +477,23 @@ export class CloudConnector {
             });
         } catch (e: any) {
             this.log(`Failed to send inbox update: ${e.message}`);
+        }
+    }
+
+    /**
+     * Send inbox update using already-read data (avoids double disk read
+     * when fileWatcher has already called getInboxForWorkspace).
+     */
+    sendInboxUpdateWithData(inboxData: any) {
+        if (!this.isConnected) return;
+        try {
+            this.send({
+                type: 'inbox_update',
+                data: inboxData,
+                timestamp: Date.now()
+            });
+        } catch (e: any) {
+            this.log(`Failed to send inbox update with data: ${e.message}`);
         }
     }
 

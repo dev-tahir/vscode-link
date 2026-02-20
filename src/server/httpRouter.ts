@@ -27,7 +27,15 @@ export async function startHTTPServerAsync(port: number): Promise<boolean> {
             const url = req.url || '/';
             log(`${req.method} ${url}`);
 
-            res.setHeader('Access-Control-Allow-Origin', '*');
+            // ── CORS: only allow localhost origins (not wildcard) ──
+            const origin = req.headers['origin'] || '';
+            const isLocalOrigin = !origin ||
+                origin.startsWith('http://localhost') ||
+                origin.startsWith('http://127.0.0.1') ||
+                origin.startsWith('vscode-webview://');
+            if (isLocalOrigin) {
+                res.setHeader('Access-Control-Allow-Origin', origin || '*');
+            }
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
             res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 

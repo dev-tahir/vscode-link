@@ -4,6 +4,22 @@ import * as path from 'path';
 import * as os from 'os';
 import { ChatMessage, ChatSession, Inbox, MessageTimelineItem, ThinkingPart, PendingCommand, ThinkingSection, ToolInvocation } from './types';
 
+// ── Inbox cache ──────────────────────────────────────────────────────────────
+// Avoids re-parsing unchanged session files on every broadcast.
+// Keyed by workspaceHash; stores the last returned Inbox plus the mtime of
+// each constituent file so we only reparse files that actually changed.
+interface InboxCacheEntry {
+    inbox: Inbox;
+    fileMtimes: Map<string, number>; // filePath → mtime ms
+}
+const _inboxCache = new Map<string, InboxCacheEntry>();
+
+/** Invalidate the cache for a workspace (call after a known write, e.g. in tests) */
+export function invalidateInboxCache(workspaceHash: string) {
+    _inboxCache.delete(workspaceHash);
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 // Get the workspace hash for the current VS Code window
 export function getCurrentWorkspaceHash(): string | null {
     const workspaceStoragePath = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage');
@@ -36,7 +52,7 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
     const workspaceStoragePath = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage');
     const chatSessionsPath = path.join(workspaceStoragePath, workspaceHash, 'chatSessions');
     
-    const inbox: Inbox = {
+    const emptyInbox: Inbox = {
         workspaceHash,
         workspacePath: chatSessionsPath,
         sessions: [],
@@ -45,12 +61,40 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
     };
     
     if (!fs.existsSync(chatSessionsPath)) {
-        return inbox;
+        return emptyInbox;
     }
     
     try {
         const files = fs.readdirSync(chatSessionsPath, { withFileTypes: true })
             .filter(f => f.isFile() && (f.name.endsWith('.json') || f.name.endsWith('.jsonl')));
+
+        // ── mtime check: see if any file has changed since our last parse ──
+        const cached = _inboxCache.get(workspaceHash);
+        let anyChanged = false;
+        const currentMtimes = new Map<string, number>();
+        for (const file of files) {
+            const filePath = path.join(chatSessionsPath, file.name);
+            try {
+                const mtime = fs.statSync(filePath).mtimeMs;
+                currentMtimes.set(filePath, mtime);
+                if (!cached || cached.fileMtimes.get(filePath) !== mtime) {
+                    anyChanged = true;
+                }
+            } catch {
+                anyChanged = true;
+            }
+        }
+        // Also detect deleted files
+        if (cached && cached.fileMtimes.size !== currentMtimes.size) {
+            anyChanged = true;
+        }
+
+        if (!anyChanged && cached) {
+            // Return a fresh copy with updated timestamp but same session data
+            return { ...cached.inbox, lastUpdated: Date.now() };
+        }
+
+        // ── Full parse — one or more files changed ──
         const sessionsById = new Map<string, ChatSession>();
         
         for (const file of files) {
@@ -75,17 +119,25 @@ export function getInboxForWorkspace(workspaceHash: string): Inbox {
             }
         }
 
-        inbox.sessions = Array.from(sessionsById.values());
-        inbox.totalMessages = inbox.sessions.reduce((sum, session) => sum + session.messageCount, 0);
-        
-        // Sort sessions by last message time (most recent first)
-        inbox.sessions.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+        const sessions = Array.from(sessionsById.values());
+        sessions.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+
+        const inbox: Inbox = {
+            workspaceHash,
+            workspacePath: chatSessionsPath,
+            sessions,
+            totalMessages: sessions.reduce((sum, s) => sum + s.messageCount, 0),
+            lastUpdated: Date.now()
+        };
+
+        // Store in cache
+        _inboxCache.set(workspaceHash, { inbox, fileMtimes: currentMtimes });
+        return inbox;
         
     } catch (e) {
         console.error('Error reading inbox:', e);
+        return emptyInbox;
     }
-    
-    return inbox;
 }
 
 // Parse JSONL format (JSON Lines) where each line is a JSON object
