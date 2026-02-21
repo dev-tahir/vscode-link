@@ -324,10 +324,17 @@ function ensureTerminalDataCapture() {
 
 /** Strip ANSI escape codes for clean text display */
 function stripAnsi(str: string): string {
-    return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-              .replace(/\x1b\][^\x07]*\x07/g, '')
-              .replace(/\x1b[()][0-9A-B]/g, '')
-              .replace(/\r/g, '');
+    return str
+        // OSC sequences: ESC ] ... BEL  or  ESC ] ... ESC \\
+        .replace(/\u001B\][\s\S]*?(?:\u0007|\u001B\\)/g, '')
+        // CSI sequences: ESC [ ... command (includes private modes like ?25h)
+        .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '')
+        // 2-byte ESC sequences (charset shifts, etc.)
+        .replace(/\u001B[@-Z\\-_]/g, '')
+        // Remove remaining C0 control chars except LF and TAB
+        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+        // Normalize carriage returns
+        .replace(/\r/g, '');
 }
 
 function registerProxyCommandHandlers(connector: CloudConnector) {
